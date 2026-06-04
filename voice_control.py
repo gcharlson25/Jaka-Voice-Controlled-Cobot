@@ -5,16 +5,17 @@ import sounddevice as sd
 import numpy as np
 import os
 import re
+import time
 
 SAMPLE_RATE = 16000
 SILENCE_THRESHOLD = 0.04   # RMS energy — raise further if still triggering on background noise
 SILENCE_DURATION = 1.2     # seconds of quiet before we stop recording
 PRE_SPEECH_BUFFER = 0.4    # seconds of audio kept before speech starts
-MAX_RECORD_SECONDS = 8     # hard cap so it never records forever in noisy environments
+MAX_RECORD_SECONDS = 10     # hard cap so it never records forever in noisy environments
 STOP_WORD = "over"         # say this at the end of your command to force stop
 
 print("Loading Whisper model...")
-model = whisper.load_model("tiny")
+model = whisper.load_model("small")
 print("Ready!")
 
 def record_with_vad():
@@ -75,15 +76,17 @@ def ask_ollama(command):
                 "content": """You are a robot controller. Extract movement intent from voice commands and convert to JSON.
 Rules:
 - right/left = x axis, right is direction 1, left is -1
-- forward/backward = y axis, forward is 1, backward is -1
+- forward/backward/back/backwards = y axis, forward is 1, backward/back/backwards is -1
 - up/down = z axis, up is 1, down is -1
 - distance is always in mm as a whole number, never convert units
 - distance can be written as mm, millimeters, or millimetres, always output as a whole number
 - "move" is optional — a direction and number alone is a valid command (e.g. "right 50" means move right 50mm)
 - ignore filler words, hesitations, repeated words, or trailing words that aren't part of the command (e.g. "move right 10mm down" — ignore "down", extract "right 10mm")
-- tolerate minor transcription errors and phonetically similar words — map them to the closest direction (e.g. "last" = left, "laughed" = left, "font" = forward, "ford" = forward, "rite" = right, "wright" = right, "write" = right, "app" = up, "dawn" = down, "drown" = down, "backed" = backward)
+- tolerate minor transcription errors and phonetically similar words — map them to the closest direction (e.g. "last" = left, "laughed" = left, "font" = forward, "ford" = forward, "fore" = forward, "4-word" = forward, "rite" = right, "wright" = right, "write" = right, "app" = up, "dawn" = down, "drown" = down, "backed" = backward, "bag" = back, "black" = back, "bat" = back)
 - if no unit is mentioned, assume the number is in millimeters
 - if a direction is clear but distance is missing entirely, assume 10mm
+- always include all three fields: axis, distance, and direction — never omit direction
+- if the input contains multiple movements joined by "and", only parse the single movement given to you — do not try to combine them
 - only return {"error": "invalid"} if there is genuinely no movement direction detectable at all
 Respond with only valid JSON like: {"axis": "x", "distance": 10, "direction": 1}
 No explanation. No other text. Only JSON."""
@@ -96,13 +99,14 @@ No explanation. No other text. Only JSON."""
     })
     result = response.json()
     text = result["message"]["content"]
+    text = re.sub(r'```[a-z]*\s*|\s*```', '', text).strip()
     return json.loads(text)
 
 def execute_command(parsed):
     try:
         axis_map = {"x": 0, "y": 1, "z": 2}
         move = [0, 0, 0, 0, 0, 0]
-        value = parsed["distance"] * parsed["direction"]
+        value = parsed["distance"] * parsed.get("direction", 1)
         if parsed["axis"] == "x":
             value = -value  # robot's physical X axis is opposite to named direction
         move[axis_map[parsed["axis"]]] = value
@@ -121,17 +125,30 @@ while True:
         print("Ending program.")
         open("C:/Projects/jaka_voice/quit.signal", "w").close()
         break
-    # strip stop word from end of command before sending to Ollama
+    # strip stop word from end of full command before splitting
     command = re.sub(r'\b' + STOP_WORD + r'\b\.?\s*$', '', command, flags=re.IGNORECASE).strip()
     if not command:
         continue
-    print("Sending to Ollama...")
-    try:
-        parsed = ask_ollama(command)
-        if parsed.get("error") == "invalid":
-            print("Invalid instruction.")
+    sub_commands = re.split(r'\band\b|\bthen\b|,', command, flags=re.IGNORECASE)
+    for sub in sub_commands:
+        sub = sub.strip().strip('.,')
+        if not sub:
             continue
-        print(f"Parsed: {parsed}")
-        execute_command(parsed)
-    except Exception:
-        print("Invalid instruction.")
+        is_backward = bool(re.search(r'\bback(wards?|ward)?\b', sub, re.IGNORECASE))
+        print("Sending to Ollama...")
+        try:
+            parsed = ask_ollama(sub)
+            if parsed.get("error") == "invalid":
+                print("Invalid instruction.")
+                continue
+            # correct Ollama's frequent mis-mapping of back/backwards to z axis
+            if is_backward and parsed.get("axis") == "z":
+                parsed["axis"] = "y"
+                parsed["direction"] = -1
+            print(f"Parsed: {parsed}")
+            execute_command(parsed)
+            # wait for robot_control to pick up this command before sending the next
+            while os.path.exists("C:/Projects/jaka_voice/command.json"):
+                time.sleep(0.05)
+        except Exception:
+            print("Invalid instruction.")
