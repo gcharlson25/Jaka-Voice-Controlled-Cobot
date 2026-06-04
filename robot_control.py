@@ -15,6 +15,16 @@ COMMAND_FILE = "command.json"
 QUIT_FILE = "quit.signal"
 LOCK_FILE = "robot_control.lock"
 
+TCP = [0, 0, 0, 0, 0, 0]
+USR = [0, 0, 0, 0, 0, 0]
+
+def coordinateSetup(cobot):
+    print("setting coordinates")
+    cobot.set_tool_data(5, TCP, "tool_screw_test")
+    cobot.set_tool_id(5)
+    cobot.set_user_frame_data(6, USR, "user_screw_test")
+    cobot.set_user_frame_id(6)
+
 def cobotSetup():
     print("\n\n\n")
     cobot = jkrc.RC("192.168.10.200")
@@ -26,11 +36,12 @@ def cobotSetup():
     cobot.enable_robot()
     print("setting payload and centroid")
     cobot.set_payload(mass = 0.5, centroid = [0, 0, 20])
+    coordinateSetup(cobot)
     return cobot
 
 def execute_move(cobot, move):
     print(f"Executing move: {move}")
-    cobot.linear_move(move, INCREMENT_MOVEMENT, False, 100)
+    cobot.linear_move(move, INCREMENT_MOVEMENT, False, 500)
     print("Move complete")
 
 def main():
