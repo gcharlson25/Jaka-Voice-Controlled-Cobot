@@ -26,7 +26,7 @@ def cobotSetup():
 
 def execute_move(cobot, move):
     print(f"Executing move: {move}")
-    cobot.linear_move(move, INCREMENT_MOVEMENT, True, 100)
+    cobot.linear_move(move, INCREMENT_MOVEMENT, False, 100)
     print("Move complete")
 
 def main():
