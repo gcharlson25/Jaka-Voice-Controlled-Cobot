@@ -53,7 +53,7 @@ def main():
                 execute_move(cobot, move)
             except Exception as e:
                 print(f"Error: {e}")
-        time.sleep(0.1)  # check every 100ms
+        time.sleep(0.05)  # check every 50ms
 
 if __name__ == '__main__':
     main()
