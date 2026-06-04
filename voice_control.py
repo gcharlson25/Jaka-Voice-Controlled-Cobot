@@ -72,14 +72,19 @@ def ask_ollama(command):
         "messages": [
             {
                 "role": "system",
-                "content": """You are a robot controller. Convert movement commands to JSON only.
+                "content": """You are a robot controller. Extract movement intent from voice commands and convert to JSON.
 Rules:
 - right/left = x axis, right is direction 1, left is -1
 - forward/backward = y axis, forward is 1, backward is -1
 - up/down = z axis, up is 1, down is -1
 - distance is always in mm as a whole number, never convert units
 - distance can be written as mm, millimeters, or millimetres, always output as a whole number
-If the input is not a valid movement command, respond with exactly: {"error": "invalid"}
+- "move" is optional — a direction and number alone is a valid command (e.g. "right 50" means move right 50mm)
+- ignore filler words, hesitations, repeated words, or trailing words that aren't part of the command (e.g. "move right 10mm down" — ignore "down", extract "right 10mm")
+- tolerate minor transcription errors and phonetically similar words — map them to the closest direction (e.g. "last" = left, "laughed" = left, "font" = forward, "ford" = forward, "rite" = right, "wright" = right, "write" = right, "app" = up, "dawn" = down, "drown" = down, "backed" = backward)
+- if no unit is mentioned, assume the number is in millimeters
+- if a direction is clear but distance is missing entirely, assume 10mm
+- only return {"error": "invalid"} if there is genuinely no movement direction detectable at all
 Respond with only valid JSON like: {"axis": "x", "distance": 10, "direction": 1}
 No explanation. No other text. Only JSON."""
             },
@@ -114,6 +119,7 @@ while True:
     print(f"You said: {command}")
     if "quit" in command.lower() or "program over" in command.lower():
         print("Ending program.")
+        open("C:/Projects/jaka_voice/quit.signal", "w").close()
         break
     # strip stop word from end of command before sending to Ollama
     command = re.sub(r'\b' + STOP_WORD + r'\b\.?\s*$', '', command, flags=re.IGNORECASE).strip()

@@ -6,10 +6,14 @@ import time
 import math
 import json
 import os
+import sys
+import ctypes
 
 ABS_MOVEMENT = 0
 INCREMENT_MOVEMENT = 1
 COMMAND_FILE = "command.json"
+QUIT_FILE = "quit.signal"
+LOCK_FILE = "robot_control.lock"
 
 def cobotSetup():
     print("\n\n\n")
@@ -30,30 +34,54 @@ def execute_move(cobot, move):
     print("Move complete")
 
 def main():
-    cobot = cobotSetup()
-    print("Robot ready, waiting for voice commands...")
-    
-    # clear any old commands on startup
-    if os.path.exists(COMMAND_FILE):
+    if os.path.exists(LOCK_FILE):
         try:
-            time.sleep(0.05)  # small delay to let voice script finish writing
-            with open(COMMAND_FILE, "r") as f:
-                move = json.load(f)
-            os.remove(COMMAND_FILE)
-            execute_move(cobot, move)
-        except Exception as e:
-            print(f"Error: {e}")
+            with open(LOCK_FILE, "r") as f:
+                pid = int(f.read().strip())
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                print("Another robot_control instance is already running. Exiting.")
+                sys.exit(1)
+            else:
+                print("Stale lock file found, removing.")
+        except Exception:
+            pass
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    if os.path.exists(QUIT_FILE):
+        os.remove(QUIT_FILE)
+    try:
+        cobot = cobotSetup()
+        print("Robot ready, waiting for voice commands...")
 
-    while True:
         if os.path.exists(COMMAND_FILE):
             try:
+                time.sleep(0.05)
                 with open(COMMAND_FILE, "r") as f:
                     move = json.load(f)
-                os.remove(COMMAND_FILE)  # delete after reading
+                os.remove(COMMAND_FILE)
                 execute_move(cobot, move)
             except Exception as e:
                 print(f"Error: {e}")
-        time.sleep(0.05)  # check every 50ms
+
+        while True:
+            if os.path.exists(QUIT_FILE):
+                os.remove(QUIT_FILE)
+                print("Quit signal received. Shutting down.")
+                break
+            if os.path.exists(COMMAND_FILE):
+                try:
+                    with open(COMMAND_FILE, "r") as f:
+                        move = json.load(f)
+                    os.remove(COMMAND_FILE)
+                    execute_move(cobot, move)
+                except Exception as e:
+                    print(f"Error: {e}")
+            time.sleep(0.05)
+    finally:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
 
 if __name__ == '__main__':
     main()
