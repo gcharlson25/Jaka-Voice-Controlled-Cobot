@@ -4,3 +4,4 @@ __pycache__/
 command.json
 robot_control.lock
 quit.signal
+.env
