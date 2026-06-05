@@ -60,7 +60,7 @@ TOOLS = [
 
 COMMAND_FILE = "C:/Projects/jaka_voice/command.json"
 
-def execute_ollama_command(tool_result):
+def execute_llm_command(tool_result):
     try:
         func = tool_result["function"]
         args = tool_result.get("args", {})

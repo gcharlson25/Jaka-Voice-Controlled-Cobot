@@ -1,4 +1,8 @@
 @echo off
+
+REM Set to "gpt" or "ollama"
+SET LLM_BACKEND=gpt
+
 echo Starting robot control...
 start "Robot Control" py -3.7 robot_control.py
 echo Starting voice control...

@@ -5,8 +5,8 @@ import numpy as np
 import sounddevice as sd
 import whisper
 
-from tools import execute_command, execute_ollama_command, COMMAND_FILE
-from llm import ask_ollama_tools
+from tools import execute_command, execute_llm_command, COMMAND_FILE
+from llm import ask_llm, _backend_name
 
 SAMPLE_RATE = 16000
 SILENCE_THRESHOLD = 0.04
@@ -112,13 +112,13 @@ while True:
             while os.path.exists(COMMAND_FILE):
                 time.sleep(0.05)
     else:
-        print("Sending to Ollama...")
-        tool_result = ask_ollama_tools(command)
+        print("Sending to LLM...")
+        tool_result = ask_llm(command)
         if tool_result is None:
             print("Invalid instruction.")
             continue
-        print(f"Ollama: {tool_result}")
-        execute_ollama_command(tool_result)
+        print(f"{_backend_name}: {tool_result}")
+        execute_llm_command(tool_result)
         if tool_result["function"] != "motion_abort":
             while os.path.exists(COMMAND_FILE):
                 time.sleep(0.05)
