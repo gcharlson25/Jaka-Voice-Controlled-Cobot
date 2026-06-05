@@ -39,10 +39,75 @@ def cobotSetup():
     coordinateSetup(cobot)
     return cobot
 
-def execute_move(cobot, move):
-    print(f"Executing move: {move}")
-    cobot.linear_move(move, INCREMENT_MOVEMENT, False, 500)
-    print("Move complete")
+def execute_move(cobot, command):
+    try:
+        # plain list from keyword parser
+        if isinstance(command, list):
+            print(f"Executing move: {command}")
+            cobot.linear_move(command, INCREMENT_MOVEMENT, False, 500)
+            print("Move complete")
+            return
+
+        func = command.get("function", "linear_move")
+
+        if func == "linear_move":
+            end_pos = command["end_pos"]
+            speed = command.get("speed", 500)
+            print(f"Executing linear_move: {end_pos} at {speed}mm/s")
+            cobot.linear_move(end_pos, INCREMENT_MOVEMENT, False, speed)
+            print("Move complete")
+
+        elif func == "circular_move":
+            ret = cobot.get_tcp_position()
+            if ret[0] != 0:
+                print(f"Error getting TCP position: {ret[0]}")
+                return
+            pos = list(ret[1])
+            R           = command["radius_mm"]
+            if R < 20:
+                print(f"Radius {R}mm too small, skipping.")
+                return
+            plane       = command.get("plane", "xy") or "xy"
+            num_circles = int(command.get("circles", 1))
+            speed       = command.get("speed", 50)
+
+            mid_pos = pos[:]
+            end_pos = pos[:]
+            if plane == "xy":
+                mid_pos[0] = pos[0]+R; mid_pos[1] = pos[1]+R
+                end_pos[1] = pos[1]+2*R
+            elif plane == "xz":
+                mid_pos[0] = pos[0]+R; mid_pos[2] = pos[2]+R
+                end_pos[2] = pos[2]+2*R
+            elif plane == "yz":
+                mid_pos[1] = pos[1]+R; mid_pos[2] = pos[2]+R
+                end_pos[2] = pos[2]+2*R
+
+            mid_rev = pos[:]
+            end_rev = pos[:]
+            if plane == "xy":
+                mid_rev[0] = pos[0]-R; mid_rev[1] = pos[1]+R
+            elif plane == "xz":
+                mid_rev[0] = pos[0]-R; mid_rev[2] = pos[2]+R
+            elif plane == "yz":
+                mid_rev[1] = pos[1]-R; mid_rev[2] = pos[2]+R
+
+            print(f"Executing circular_move: R={R}mm plane={plane} x{num_circles}")
+            for _ in range(num_circles):
+                for arc_end, arc_mid in [(end_pos, mid_pos), (end_rev, mid_rev)]:
+                    cobot.circular_move(arc_end, arc_mid, ABS_MOVEMENT, True, speed, 200, 0.1)
+            print("Move complete")
+
+        elif func == "motion_abort":
+            print("Aborting motion!")
+            cobot.motion_abort()
+            print("Motion aborted")
+
+        else:
+            print(f"Unknown function: {func}")
+
+    except Exception as e:
+        print(f"Error in execute_move: {e}")
 
 def main():
     if os.path.exists(LOCK_FILE):

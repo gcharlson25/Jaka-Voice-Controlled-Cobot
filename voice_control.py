@@ -1,4 +1,5 @@
 import json
+import requests
 import whisper
 import sounddevice as sd
 import numpy as np
@@ -23,6 +24,135 @@ DIRECTION_MAP = {
     "up":        ("z",  1),
     "down":      ("z", -1),
 }
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "linear_move",
+            "description": (
+                "Move the robot arm in a straight line. "
+                "Positive x_mm = right, negative = left. "
+                "Positive y_mm = forward, negative = backward. "
+                "Positive z_mm = up, negative = down. "
+                "Set unused axes to 0. Default 10mm if no distance given. Default 100 mm/s."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x_mm":      {"type": "number", "description": "X offset in mm"},
+                    "y_mm":      {"type": "number", "description": "Y offset in mm"},
+                    "z_mm":      {"type": "number", "description": "Z offset in mm"},
+                    "speed_mms": {"type": "number", "description": "Speed in mm/s, default 100"},
+                },
+                "required": ["x_mm", "y_mm", "z_mm"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "circular_move",
+            "description": (
+                "Move the robot end effector in a circle. "
+                "'xy' = horizontal circle. 'xz' = vertical circle in X-Z plane. 'yz' = vertical circle in Y-Z plane. "
+                "circles = number of full loops, default 1."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "radius_mm": {"type": "number",  "description": "Radius in mm"},
+                    "plane":     {"type": "string",  "enum": ["xy", "xz", "yz"]},
+                    "circles":   {"type": "integer", "description": "Number of full circles, default 1"},
+                    "speed_mms": {"type": "number",  "description": "Speed in mm/s, default 50"},
+                },
+                "required": ["radius_mm", "plane"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "motion_abort",
+            "description": "Immediately stop all robot motion. Use for stop, halt, abort, emergency stop.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+]
+
+def ask_ollama_tools(command):
+    try:
+        response = requests.post("http://localhost:11434/api/chat", json={
+            "model": "llama3.2",
+            "stream": False,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You control a robot arm. Always respond by calling a tool — never with plain text. "
+                        "Convert the voice command into the correct tool call."
+                    ),
+                },
+                {"role": "user", "content": command},
+            ],
+            "tools": TOOLS,
+        })
+        result = response.json()
+        message = result["message"]
+        if not message.get("tool_calls"):
+            return None
+        tool_call = message["tool_calls"][0]
+        name = tool_call["function"]["name"]
+        args = tool_call["function"]["arguments"]
+        if isinstance(args, str):
+            args = json.loads(args)
+        return {"function": name, "args": args}
+    except Exception as e:
+        print(f"Ollama error: {e}")
+        return None
+
+def execute_ollama_command(tool_result):
+    try:
+        func = tool_result["function"]
+        args = tool_result.get("args", {})
+
+        if func == "linear_move":
+            x = -(float(args.get("x_mm", 0)))  # robot's physical X axis is inverted
+            y = float(args.get("y_mm", 0))
+            z = float(args.get("z_mm", 0))
+            speed = float(args.get("speed_mms", 100))
+            if x == 0.0 and y == 0.0 and z == 0.0:
+                return
+            move = [x, y, z, 0, 0, 0]
+            print(f"Moving: {move}")
+            with open("C:/Projects/jaka_voice/command.json", "w") as f:
+                json.dump(move, f)
+            print("Command sent!")
+
+        elif func == "circular_move":
+            cmd = {
+                "function": "circular_move",
+                "radius_mm": float(args.get("radius_mm", 50)),
+                "plane":     args.get("plane", "xy"),
+                "circles":   int(float(args.get("circles", 1))),
+                "speed":     float(args.get("speed_mms", 50)),
+            }
+            print(f"Moving: {cmd}")
+            with open("C:/Projects/jaka_voice/command.json", "w") as f:
+                json.dump(cmd, f)
+            print("Command sent!")
+
+        elif func == "motion_abort":
+            cmd = {"function": "motion_abort"}
+            with open("C:/Projects/jaka_voice/command.json", "w") as f:
+                json.dump(cmd, f)
+            print("Abort sent!")
+
+        else:
+            print(f"Unknown function: {func}")
+
+    except Exception as e:
+        print(f"Error in execute_ollama_command: {e}")
 
 print("Loading Whisper model...")
 model = whisper.load_model("small")
@@ -115,16 +245,23 @@ while True:
     command = re.sub(r'\b' + STOP_WORD + r'\b\.?\s*$', '', command, flags=re.IGNORECASE).strip()
     if not command:
         continue
-    sub_commands = re.split(r'\band\b|\bthen\b|,', command, flags=re.IGNORECASE)
-    for sub in sub_commands:
-        sub = sub.strip().strip('.,')
-        if not sub:
-            continue
-        parsed = parse_command(sub)
-        if parsed is None:
+    sub_commands = [s.strip().strip('.,') for s in re.split(r'\band\b|\bthen\b|,', command, flags=re.IGNORECASE) if s.strip().strip('.,')]
+    parsed_parts = [parse_command(s) for s in sub_commands]
+
+    if sub_commands and all(p is not None for p in parsed_parts):
+        for parsed in parsed_parts:
+            print(f"Parsed: {parsed}")
+            execute_command(parsed)
+            while os.path.exists("C:/Projects/jaka_voice/command.json"):
+                time.sleep(0.05)
+    else:
+        print("Sending to Ollama...")
+        tool_result = ask_ollama_tools(command)
+        if tool_result is None:
             print("Invalid instruction.")
             continue
-        print(f"Parsed: {parsed}")
-        execute_command(parsed)
-        while os.path.exists("C:/Projects/jaka_voice/command.json"):
-            time.sleep(0.05)
+        print(f"Ollama: {tool_result}")
+        execute_ollama_command(tool_result)
+        if tool_result["function"] != "motion_abort":
+            while os.path.exists("C:/Projects/jaka_voice/command.json"):
+                time.sleep(0.05)
