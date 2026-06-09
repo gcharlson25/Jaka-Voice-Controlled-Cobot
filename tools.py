@@ -1,7 +1,5 @@
 import json
 import os
-import re
-import time
 
 TOOLS = [
     {
@@ -132,6 +130,33 @@ def execute_llm_command(tool_result):
 
     except Exception as e:
         print(f"Error in execute_ollama_command: {e}")
+
+def execute_finetuned_command(cmd):
+    """Write a positional-args command from llm_finetuned to command.json."""
+    try:
+        func = cmd["function"]
+        args = cmd.get("args", [])
+
+        if func == "circular_move" and "args" not in cmd:
+            # radius-based command for the proven circular_move handler
+            print(f"Sending: {cmd}")
+            with open(COMMAND_FILE, "w") as f:
+                json.dump(cmd, f)
+            print("Command sent!")
+            return
+
+        PASS_THROUGH = {"linear_move", "joint_move", "set_digital_output",
+                        "motion_abort", "execute_script"}
+        if func in PASS_THROUGH:
+            payload = cmd if func == "execute_script" else {"function": func, "args": args}
+            print(f"Sending: {payload}")
+            with open(COMMAND_FILE, "w") as f:
+                json.dump(payload, f)
+            print("Command sent!")
+        else:
+            print(f"Unknown function: {func}")
+    except Exception as e:
+        print(f"Error in execute_finetuned_command: {e}")
 
 def execute_command(parsed):
     try:

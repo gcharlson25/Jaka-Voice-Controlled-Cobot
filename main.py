@@ -5,8 +5,10 @@ import numpy as np
 import sounddevice as sd
 import whisper
 
-from tools import execute_command, execute_llm_command, COMMAND_FILE
-from llm import ask_llm, _backend_name
+from tools import execute_command, execute_finetuned_command, COMMAND_FILE    #comment to switch to function calling
+from llm_finetuned import ask_llm, _backend_name
+# from tools import execute_command, execute_llm_command, COMMAND_FILE    #comment to switch to gpt prompt
+# from llm import ask_llm, _backend_name
 
 SAMPLE_RATE = 16000
 SILENCE_THRESHOLD = 0.04
@@ -113,12 +115,23 @@ while True:
                 time.sleep(0.05)
     else:
         print("Sending to LLM...")
-        tool_result = ask_llm(command)
-        if tool_result is None:
+        tool_results = ask_llm(command)     #comment to switch to function calling
+        if not tool_results:
             print("Invalid instruction.")
             continue
-        print(f"{_backend_name}: {tool_result}")
-        execute_llm_command(tool_result)
-        if tool_result["function"] != "motion_abort":
-            while os.path.exists(COMMAND_FILE):
-                time.sleep(0.05)
+        print(f"{_backend_name}: {tool_results}")
+        for tool_result in tool_results:
+            execute_finetuned_command(tool_result)
+            if tool_result["function"] != "motion_abort":
+                while os.path.exists(COMMAND_FILE):
+                    time.sleep(0.05)
+
+        # tool_result = ask_llm(command)   #comment to switch to gpt prompt
+        # if tool_result is None:
+        #     print("Invalid instruction.")
+        #     continue
+        # print(f"{_backend_name}: {tool_result}")
+        # execute_llm_command(tool_result)
+        # if tool_result["function"] != "motion_abort":
+        #     while os.path.exists(COMMAND_FILE):
+        #         time.sleep(0.05)
