@@ -17,7 +17,9 @@ _load_env()
 
 SYSTEM_PROMPT = (
     "You control a robot arm. Always respond by calling a tool — never with plain text. "
-    "Convert the voice command into the correct tool call."
+    "Convert the voice command into the correct tool call. "
+    "The robot can fasten or unfasten screws numbered 1 through 5, or all screws at once (screw_number=0). "
+    "Use screw_operation for any command involving fastening, tightening, unfastening, loosening, or removing screws."
 )
 
 class ChatGPTLLM:

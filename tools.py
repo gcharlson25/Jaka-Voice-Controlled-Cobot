@@ -56,6 +56,25 @@ TOOLS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "screw_operation",
+            "description": (
+                "Fasten or unfasten screws on the workpiece. "
+                "Use when the user says fasten, tighten, screw in, unfasten, loosen, remove, or unscrew. "
+                "screw_number is 1-5 for a specific screw, or 0 for all screws."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action":       {"type": "string", "enum": ["fasten", "unfasten"], "description": "fasten or unfasten"},
+                    "screw_number": {"type": "integer", "description": "Screw number 1-5, or 0 for all screws"},
+                },
+                "required": ["action", "screw_number"],
+            },
+        },
+    },
 ]
 
 COMMAND_FILE = "C:/Projects/jaka_voice/command.json"
@@ -96,6 +115,17 @@ def execute_llm_command(tool_result):
             with open(COMMAND_FILE, "w") as f:
                 json.dump(cmd, f)
             print("Abort sent!")
+
+        elif func == "screw_operation":
+            cmd = {
+                "function":     "screw_operation",
+                "action":       args.get("action", "fasten"),
+                "screw_number": int(float(args.get("screw_number", 0))),
+            }
+            print(f"Screw operation: {cmd}")
+            with open(COMMAND_FILE, "w") as f:
+                json.dump(cmd, f)
+            print("Command sent!")
 
         else:
             print(f"Unknown function: {func}")

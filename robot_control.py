@@ -9,6 +9,12 @@ import os
 import sys
 import ctypes
 
+from screws import (
+    fastenScrew1, fastenScrew2, fastenScrew3, fastenScrew4, fastenScrew5,
+    unfastenScrew1, unfastenScrew2, unfastenScrew3, unfastenScrew4, unfastenScrew5,
+    fastenAll, unfastenAll,
+)
+
 ABS_MOVEMENT = 0
 INCREMENT_MOVEMENT = 1
 COMMAND_FILE = "command.json"
@@ -102,6 +108,20 @@ def execute_move(cobot, command):
             print("Aborting motion!")
             cobot.motion_abort()
             print("Motion aborted")
+
+        elif func == "screw_operation":
+            action = command.get("action", "fasten")
+            screw_number = int(command.get("screw_number", 0))
+            screw_funcs = {
+                "fasten":   [fastenScrew1, fastenScrew2, fastenScrew3, fastenScrew4, fastenScrew5],
+                "unfasten": [unfastenScrew1, unfastenScrew2, unfastenScrew3, unfastenScrew4, unfastenScrew5],
+            }
+            if screw_number == 0:
+                fastenAll(cobot) if action == "fasten" else unfastenAll(cobot)
+            elif 1 <= screw_number <= 5:
+                screw_funcs[action][screw_number - 1](cobot)
+            else:
+                print(f"Invalid screw number: {screw_number}")
 
         else:
             print(f"Unknown function: {func}")
