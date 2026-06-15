@@ -5,3 +5,8 @@ command.json
 robot_control.lock
 quit.signal
 .env
+*.pt
+*.pth
+screw_images/
+screw_dataset/
+runs/
