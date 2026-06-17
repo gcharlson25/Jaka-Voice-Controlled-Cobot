@@ -29,10 +29,10 @@ SCREW4_FASTEN_START_JOINT = [math.radians(x) for x in [-297.542, 91.465, -113.50
 SCREW5_UNFASTEN_START_JOINT = [math.radians(x) for x in [-303.322, 89.537, -113.995, 22.178, -118.466, -271.256]]
 SCREW5_FASTEN_START_JOINT = [math.radians(x) for x in [-303.521, 90.297, -112.363, 19.783, -118.664, -271.265]]
 
-ENGAGE = [0, 0, -7.5, 0, 0, 0]
+ENGAGE = [0, 0, -5, 0, 0, 0]
 DISENGAGE = [0, 0, 75, 0, 0, 0]
-UNFASTEN = [0, 0, 40, 0, 0, 0]
-FASTEN = [0, 0, -24, 0, 0, 0]
+UNFASTEN = [0, 0, 18, 0, 0, 0]
+FASTEN = [0, 0, -21.5, 0, 0, 0]
 
 def coordinateSetup(cobot):
     print("setting TCP")
@@ -62,19 +62,21 @@ def cobotSetup():
 
 def fastenScrewOperation(cobot):
     cobot.set_digital_output(IO_CABINET, FASTENING, ON)
-    time.sleep(2)
+    time.sleep(1)
     cobot.linear_move(ENGAGE, INCREMENT_MOVEMENT, True, 25)
-    cobot.linear_move(FASTEN, INCREMENT_MOVEMENT, True, 25)
+    cobot.linear_move(FASTEN, INCREMENT_MOVEMENT, True, 5)
     cobot.set_digital_output(IO_CABINET, FASTENING, OFF)
     cobot.linear_move(DISENGAGE, INCREMENT_MOVEMENT, True, 500)
 
 def unfastenScrewOperation(cobot):
-    time.sleep(2)
+    time.sleep(0.5)
+    cobot.linear_move(ENGAGE, INCREMENT_MOVEMENT, True, 2000)
     cobot.linear_move(ENGAGE, INCREMENT_MOVEMENT, True, 2000)
     cobot.set_digital_output(IO_CABINET, UNFASTENING, ON)
-    cobot.linear_move(UNFASTEN, INCREMENT_MOVEMENT, True, 15)
+    time.sleep(0.5)
+    cobot.linear_move(UNFASTEN, INCREMENT_MOVEMENT, True, 5)
     cobot.set_digital_output(IO_CABINET, UNFASTENING, OFF)
-    cobot.linear_move(DISENGAGE, INCREMENT_MOVEMENT, True, 500)
+    cobot.linear_move(DISENGAGE, INCREMENT_MOVEMENT, True, 2000)
 
 def unfastenScrew1(cobot):
     print("unfastening screw one")
