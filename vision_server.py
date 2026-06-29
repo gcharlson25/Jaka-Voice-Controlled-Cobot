@@ -1,17 +1,25 @@
-import __common
-__common.init_env()
-import jkrc
+"""
+Vision server — runs camera, YOLO detection, and OpenCV UI.
+Sends robot commands over a TCP socket to robot_client.py.
+Requires Python 3.12+ (ultralytics).
+
+Usage:  py -3.12 vision_server.py
+"""
 
 import pyrealsense2 as rs
 import numpy as np
 import cv2
 import os
+import sys
 import time
 import json
+import socket
+import struct
 from ultralytics import YOLO
 
-ABS = 0
-INCR = 1
+HOST = "127.0.0.1"
+PORT = 9100
+
 SPEED = 250
 STEP = 1
 
@@ -19,13 +27,8 @@ ALIGN_SPEED = 100
 ALIGN_STEP = 1
 ALIGN_TOLERANCE = 10
 
-# Pixel-to-robot direction mapping.
-# Flip the sign (+1 / -1) if the robot moves the wrong way during auto-align.
-PIXEL_X_TO_ROBOT_X = -1
-PIXEL_Y_TO_ROBOT_Y = -1
-
-TCP = [0, 0, 0, 0, 0, 0]
-USR = [0, 0, 0, 0, 0, 0]
+PIXEL_X_TO_ROBOT_DIR = 1
+PIXEL_Y_TO_ROBOT_DIR = 1
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, "mounted_screw")
@@ -35,34 +38,39 @@ MODEL_PATH = os.path.join(BASE_DIR, "runs", "detect", "head_detect", "weights", 
 model = YOLO(MODEL_PATH)
 
 CONTROLS = {
-    ord('w'): [0, -STEP, 0, 0, 0, 0],   # backward (-Y)
-    ord('s'): [0, STEP, 0, 0, 0, 0],     # forward (+Y)
-    ord('d'): [-STEP, 0, 0, 0, 0, 0],    # right (-X)
-    ord('a'): [STEP, 0, 0, 0, 0, 0],     # left (+X)
-    ord('e'): [0, 0, STEP, 0, 0, 0],     # up (+Z)
-    ord('q'): [0, 0, -STEP, 0, 0, 0],    # down (-Z)
+    ord('w'): [0, -STEP, 0, 0, 0, 0],
+    ord('s'): [0, STEP, 0, 0, 0, 0],
+    ord('d'): [-STEP, 0, 0, 0, 0, 0],
+    ord('a'): [STEP, 0, 0, 0, 0, 0],
+    ord('e'): [0, 0, STEP, 0, 0, 0],
+    ord('q'): [0, 0, -STEP, 0, 0, 0],
 }
 
 
-def setup_robot():
-    cobot = jkrc.RC("192.168.10.200")
-    cobot.login()
-    cobot.power_on()
-    cobot.enable_robot()
-    cobot.set_payload(mass=0.5, centroid=[0, 0, 20])
-    cobot.set_tool_data(5, TCP, "tool_teleop")
-    cobot.set_tool_id(5)
-    cobot.set_user_frame_data(6, USR, "user_teleop")
-    cobot.set_user_frame_id(6)
-    return cobot
+def send_msg(sock, msg):
+    data = json.dumps(msg).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(data)) + data)
 
 
-def setup_camera():
-    pipeline = rs.pipeline()
-    config = rs.config()
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    pipeline.start(config)
-    return pipeline
+def recv_msg(sock):
+    raw = _recv_exact(sock, 4)
+    if raw is None:
+        return None
+    length = struct.unpack("!I", raw)[0]
+    data = _recv_exact(sock, length)
+    if data is None:
+        return None
+    return json.loads(data.decode("utf-8"))
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
 
 
 def detect_screw(image):
@@ -70,7 +78,6 @@ def detect_screw(image):
     boxes = results[0].boxes
     if len(boxes) == 0:
         return None
-    # Pick the detection closest to frame center
     cx, cy = image.shape[1] // 2, image.shape[0] // 2
     best = None
     best_dist = float("inf")
@@ -99,7 +106,21 @@ def save_calibration(x, y):
     print(f"Calibration saved: target pixel = ({x}, {y})")
 
 
-def auto_align(cobot, pipeline, target):
+def setup_camera():
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    pipeline.start(config)
+    return pipeline
+
+
+def send_robot_command(sock, command):
+    send_msg(sock, command)
+    reply = recv_msg(sock)
+    return reply
+
+
+def auto_align(sock, pipeline, target):
     target_x, target_y = target
     print(f"Auto-aligning to target pixel ({target_x}, {target_y})...")
     print("Press ESC to cancel")
@@ -144,11 +165,11 @@ def auto_align(cobot, pipeline, target):
 
         move = [0, 0, 0, 0, 0, 0]
         if abs(err_x) > ALIGN_TOLERANCE:
-            move[0] = ALIGN_STEP * PIXEL_X_TO_ROBOT_X * (1 if err_x > 0 else -1)
+            move[1] = ALIGN_STEP * PIXEL_X_TO_ROBOT_DIR * (1 if err_x > 0 else -1)
         if abs(err_y) > ALIGN_TOLERANCE:
-            move[1] = ALIGN_STEP * PIXEL_Y_TO_ROBOT_Y * (1 if err_y > 0 else -1)
+            move[0] = ALIGN_STEP * PIXEL_Y_TO_ROBOT_DIR * (1 if err_y > 0 else -1)
 
-        cobot.linear_move(move, INCR, True, ALIGN_SPEED)
+        send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
 
         if cv2.waitKey(1) & 0xFF == 27:
             print("Auto-align cancelled")
@@ -156,9 +177,18 @@ def auto_align(cobot, pipeline, target):
 
 
 def main():
-    cobot = setup_robot()
-    pipeline = setup_camera()
+    print(f"Connecting to robot client at {HOST}:{PORT}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect((HOST, PORT))
+    except ConnectionRefusedError:
+        print("ERROR: Could not connect. Start robot_client.py first.")
+        sys.exit(1)
+    print("Connected to robot client.")
 
+    send_robot_command(sock, {"command": "setup"})
+
+    pipeline = setup_camera()
     cv2.namedWindow("Teleop", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Teleop", 1280, 960)
 
@@ -244,15 +274,17 @@ def main():
 
             if key == ord('t'):
                 if target:
-                    auto_align(cobot, pipeline, target)
+                    auto_align(sock, pipeline, target)
                 else:
                     print("No calibration! Align over a screw and press C first.")
 
             if key in CONTROLS:
                 move = CONTROLS[key]
                 print(f"Moving: {move}")
-                cobot.linear_move(move, INCR, False, SPEED)
+                send_robot_command(sock, {"command": "move", "move": move, "speed": SPEED, "blocking": False})
     finally:
+        send_robot_command(sock, {"command": "shutdown"})
+        sock.close()
         pipeline.stop()
         cv2.destroyAllWindows()
 
