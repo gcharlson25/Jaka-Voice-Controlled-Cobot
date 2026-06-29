@@ -9,7 +9,6 @@ quit.signal
 .env
 *.pt
 *.pth
-out/
 screw_images/
 mounted_screw/
 mounted_screw_dataset/
