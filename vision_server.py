@@ -24,8 +24,15 @@ SPEED = 250
 STEP = 1
 
 ALIGN_SPEED = 100
-ALIGN_STEP = 1
-ALIGN_TOLERANCE = 10
+ALIGN_TOLERANCE = 1
+
+ALIGN_STEP_BANDS = [
+    (100, 5.0),
+    (50, 2.0),
+    (20, 1.0),
+    (10, 0.5),
+    (0, 0.1),
+]
 
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
@@ -114,6 +121,14 @@ def setup_camera():
     return pipeline
 
 
+def get_step_size(err_px):
+    err_px = abs(err_px)
+    for threshold, step_mm in ALIGN_STEP_BANDS:
+        if err_px > threshold:
+            return step_mm
+    return ALIGN_STEP_BANDS[-1][1]
+
+
 def send_robot_command(sock, command):
     send_msg(sock, command)
     reply = recv_msg(sock)
@@ -165,9 +180,9 @@ def auto_align(sock, pipeline, target):
 
         move = [0, 0, 0, 0, 0, 0]
         if abs(err_x) > ALIGN_TOLERANCE:
-            move[1] = ALIGN_STEP * PIXEL_X_TO_ROBOT_DIR * (1 if err_x > 0 else -1)
+            move[1] = get_step_size(err_x) * PIXEL_X_TO_ROBOT_DIR * (1 if err_x > 0 else -1)
         if abs(err_y) > ALIGN_TOLERANCE:
-            move[0] = ALIGN_STEP * PIXEL_Y_TO_ROBOT_DIR * (1 if err_y > 0 else -1)
+            move[0] = get_step_size(err_y) * PIXEL_Y_TO_ROBOT_DIR * (1 if err_y > 0 else -1)
 
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
 
