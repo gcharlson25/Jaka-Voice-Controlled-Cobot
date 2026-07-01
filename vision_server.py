@@ -1,10 +1,3 @@
-"""
-Vision server — runs camera, YOLO detection, and OpenCV UI.
-Sends robot commands over a TCP socket to robot_client.py.
-Requires Python 3.12+ (ultralytics).
-
-Usage:  py -3.12 vision_server.py
-"""
 
 import pyrealsense2 as rs
 import numpy as np

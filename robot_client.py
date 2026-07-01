@@ -1,9 +1,3 @@
-"""
-Robot client -- listens for commands from vision_server.py and drives the JAKA robot.
-Requires Python 3.7 (jkrc SDK).
-
-Usage:  python robot_client.py
-"""
 
 import __common
 __common.init_env()
