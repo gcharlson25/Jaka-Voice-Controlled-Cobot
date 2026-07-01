@@ -31,7 +31,8 @@ ALIGN_STEP_BANDS = [
     (50, 2.0),
     (20, 1.0),
     (10, 0.5),
-    (0, 0.1),
+    (5, 0.1),
+    (0, 0.05),
 ]
 
 PIXEL_X_TO_ROBOT_DIR = 1
@@ -185,6 +186,7 @@ def auto_align(sock, pipeline, target):
             move[0] = get_step_size(err_y) * PIXEL_Y_TO_ROBOT_DIR * (1 if err_y > 0 else -1)
 
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.25)
 
         if cv2.waitKey(1) & 0xFF == 27:
             print("Auto-align cancelled")
