@@ -240,6 +240,8 @@ def main():
     capture_count = 0
     target, calibration_z = load_calibration()
     current_depth_mm = None
+    robot_pos = None
+    last_pos_time = 0
 
     print("Teleop ready!")
     print("  W = backward, S = forward")
@@ -289,12 +291,27 @@ def main():
                         depth_color = (0, 128, 255)
                     cv2.putText(display, depth_label, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, depth_color, 2)
 
+            now = time.time()
+            if now - last_pos_time >= 0.2:
+                reply = send_robot_command(sock, {"command": "get_position"})
+                if reply and reply.get("status") == "ok":
+                    robot_pos = reply["position"]
+                last_pos_time = now
+
+            if robot_pos is not None:
+                x, y, z = robot_pos[0], robot_pos[1], robot_pos[2]
+                pos_lines = [f"X: {x:.1f}", f"Y: {y:.1f}", f"Z: {z:.1f}"]
+                for i, line in enumerate(pos_lines):
+                    (tw, _), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.putText(display, line, (display.shape[1] - tw - 10, 30 + i * 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
             if target:
                 cv2.drawMarker(display, (target[0], target[1]), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
             if calibration_z is not None:
                 cv2.putText(display, f"Calibration Z: {calibration_z:.1f} mm",
-                            (10, display.shape[0] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+                            (10, display.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
 
             status = "RAPID CAPTURE ON" if rapid_capture else "R: rapid  C: calib  T: align"
             cv2.putText(display, f"WASD/QE: move  P: photo  {status}  ESC: quit",

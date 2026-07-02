@@ -74,6 +74,12 @@ def handle_command(msg):
         cobot.linear_move(move, INCR, blocking, speed)
         return {"status": "ok"}
 
+    elif cmd == "get_position":
+        ret, pos = cobot.get_tcp_position()
+        if ret == 0:
+            return {"status": "ok", "position": list(pos)}
+        return {"status": "error", "message": "get_tcp_position failed"}
+
     elif cmd == "shutdown":
         print("Shutdown requested.")
         return {"status": "ok"}
