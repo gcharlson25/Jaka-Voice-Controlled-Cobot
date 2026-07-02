@@ -31,6 +31,9 @@ ALIGN_STEP_BANDS = [
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
 
+CAMERA_HORIZ_OFFSET = 91.0   # mm, horizontal distance from camera to tool tip
+CAMERA_VERT_OFFSET = 116.1  # mm, derived from calibration geometry
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, "mounted_screw")
 CALIBRATION_FILE = os.path.join(SAVE_DIR, "calibration.json")
@@ -92,27 +95,56 @@ def detect_screw(image):
     return best
 
 
+def compute_calibration_z(depth_mm):
+    inner = depth_mm ** 2 - CAMERA_HORIZ_OFFSET ** 2
+    if inner < 0:
+        return None
+    return -CAMERA_VERT_OFFSET + np.sqrt(inner)
+
+
 def load_calibration():
     if os.path.exists(CALIBRATION_FILE):
         with open(CALIBRATION_FILE, "r") as f:
             data = json.load(f)
-            return data["target_x"], data["target_y"]
-    return None
+            return (data["target_x"], data["target_y"]), data.get("calibration_z")
+    return None, None
 
 
-def save_calibration(x, y):
+def save_calibration(x, y, cal_z):
     os.makedirs(SAVE_DIR, exist_ok=True)
     with open(CALIBRATION_FILE, "w") as f:
-        json.dump({"target_x": x, "target_y": y}, f)
-    print(f"Calibration saved: target pixel = ({x}, {y})")
+        json.dump({"target_x": x, "target_y": y, "calibration_z": cal_z}, f)
+    print(f"Calibration saved: target pixel = ({x}, {y}), calibration Z = {cal_z:.1f} mm")
+
+
+def get_depth_at_screw(depth_data, screw):
+    sx, sy, sw, sh = screw
+    h, w = depth_data.shape
+    r = max(sw, sh) // 4
+    samples = []
+    for angle_deg in range(0, 360, 20):
+        rad = np.radians(angle_deg)
+        for frac in [0.0, 0.5]:
+            px = int(sx + r * frac * np.cos(rad))
+            py = int(sy + r * frac * np.sin(rad))
+            if 0 <= px < w and 0 <= py < h:
+                val = depth_data[py, px]
+                if val > 0:
+                    samples.append(float(val))
+    return float(np.median(samples)) if samples else None
+
+
+hole_fill = rs.hole_filling_filter()
 
 
 def setup_camera():
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
     pipeline.start(config)
-    return pipeline
+    align = rs.align(rs.stream.color)
+    return pipeline, align
 
 
 def get_step_size(err_px):
@@ -129,14 +161,15 @@ def send_robot_command(sock, command):
     return reply
 
 
-def auto_align(sock, pipeline, target):
+def auto_align(sock, pipeline, align, target):
     target_x, target_y = target
     print(f"Auto-aligning to target pixel ({target_x}, {target_y})...")
     print("Press ESC to cancel")
 
     while True:
         frames = pipeline.wait_for_frames()
-        color_frame = frames.get_color_frame()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
         if not color_frame:
             continue
 
@@ -198,14 +231,15 @@ def main():
 
     send_robot_command(sock, {"command": "setup"})
 
-    pipeline = setup_camera()
+    pipeline, align = setup_camera()
     cv2.namedWindow("Teleop", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Teleop", 1280, 960)
 
     rapid_capture = False
     last_capture_time = 0
     capture_count = 0
-    target = load_calibration()
+    target, calibration_z = load_calibration()
+    current_depth_mm = None
 
     print("Teleop ready!")
     print("  W = backward, S = forward")
@@ -217,28 +251,50 @@ def main():
     print("  T = auto-align to calibrated target")
     print("  ESC = quit")
     if target:
-        print(f"  Loaded calibration: target pixel = ({target[0]}, {target[1]})")
+        print(f"  Loaded calibration: target pixel = ({target[0]}, {target[1]}), calibration Z = {calibration_z}")
     else:
         print("  No calibration found. Align over a screw and press C first.")
 
     try:
         while True:
             frames = pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
+            aligned = align.process(frames)
+            color_frame = aligned.get_color_frame()
+            depth_frame = aligned.get_depth_frame()
             if not color_frame:
                 continue
 
             image = np.asanyarray(color_frame.get_data())
+            if depth_frame:
+                filled = hole_fill.process(depth_frame)
+                depth_data = np.asanyarray(filled.get_data())
+            else:
+                depth_data = None
             display = image.copy()
 
+            current_depth_mm = None
             screw = detect_screw(image)
             if screw:
                 sx, sy, sw, sh = screw
                 cv2.rectangle(display, (sx - sw // 2, sy - sh // 2), (sx + sw // 2, sy + sh // 2), (0, 255, 0), 2)
                 cv2.circle(display, (sx, sy), 3, (0, 255, 0), -1)
+                if depth_data is not None:
+                    depth_mm = get_depth_at_screw(depth_data, screw)
+                    if depth_mm is not None and 100 <= depth_mm <= 400:
+                        current_depth_mm = depth_mm
+                        depth_label = f"Depth: {depth_mm:.0f} mm"
+                        depth_color = (0, 255, 255)
+                    else:
+                        depth_label = "Depth: --- mm"
+                        depth_color = (0, 128, 255)
+                    cv2.putText(display, depth_label, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, depth_color, 2)
 
             if target:
                 cv2.drawMarker(display, (target[0], target[1]), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
+
+            if calibration_z is not None:
+                cv2.putText(display, f"Calibration Z: {calibration_z:.1f} mm",
+                            (10, display.shape[0] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
 
             status = "RAPID CAPTURE ON" if rapid_capture else "R: rapid  C: calib  T: align"
             cv2.putText(display, f"WASD/QE: move  P: photo  {status}  ESC: quit",
@@ -278,13 +334,14 @@ def main():
                 if screw:
                     sx, sy, sw, sh = screw
                     target = (sx, sy)
-                    save_calibration(sx, sy)
+                    calibration_z = compute_calibration_z(current_depth_mm) if current_depth_mm is not None else None
+                    save_calibration(sx, sy, calibration_z)
                 else:
                     print("No screw detected! Move closer and try again.")
 
             if key == ord('t'):
                 if target:
-                    auto_align(sock, pipeline, target)
+                    auto_align(sock, pipeline, align, target)
                 else:
                     print("No calibration! Align over a screw and press C first.")
 
