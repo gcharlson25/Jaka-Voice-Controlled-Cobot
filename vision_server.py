@@ -18,6 +18,8 @@ STEP = 1
 
 ALIGN_SPEED = 100
 ALIGN_TOLERANCE = 1
+DEPTH_PROBE_STEP = 80.0
+MAX_DELTA_Z = 60.0
 
 ALIGN_STEP_BANDS = [
     (100, 5.0),
@@ -32,7 +34,7 @@ PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
 
 CAMERA_HORIZ_OFFSET = 91.0   # mm, horizontal distance from camera to tool tip
-CAMERA_VERT_OFFSET = 116.1  # mm, derived from calibration geometry
+CAMERA_VERT_OFFSET = 95.0   # mm, vertical distance from camera to tool tip
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, "mounted_screw")
@@ -138,6 +140,27 @@ def get_depth_at_screw(depth_data, screw):
 hole_fill = rs.hole_filling_filter()
 
 
+def _sample_depth_median(pipeline, align, n_frames=5):
+    samples = []
+    for _ in range(n_frames):
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
+        depth_frame = aligned.get_depth_frame()
+        if not color_frame or not depth_frame:
+            continue
+        image = np.asanyarray(color_frame.get_data())
+        filled = hole_fill.process(depth_frame)
+        depth_data = np.asanyarray(filled.get_data())
+        screw = detect_screw(image)
+        if screw is None:
+            continue
+        d = get_depth_at_screw(depth_data, screw)
+        if d is not None and 100 <= d <= 400:
+            samples.append(d)
+    return float(np.median(samples)) if samples else None
+
+
 def setup_camera():
     pipeline = rs.pipeline()
     config = rs.config()
@@ -162,11 +185,30 @@ def send_robot_command(sock, command):
     return reply
 
 
-def auto_align(sock, pipeline, align, target):
+def auto_align(sock, pipeline, align, target, calibration_z):
     target_x, target_y = target
     print(f"Auto-aligning to target pixel ({target_x}, {target_y})...")
     print("Press ESC to cancel")
 
+    d = _sample_depth_median(pipeline, align)
+    if d is None:
+        print("Z probe failed: no depth reading")
+        return False, None
+
+    X = compute_calibration_z(d)
+    if X is None:
+        print(f"Z probe failed: depth {d:.1f} too small for geometry")
+        return False, None
+
+    delta_z = X - calibration_z
+    if abs(delta_z) > MAX_DELTA_Z:
+        print(f"Z probe rejected: delta_z {delta_z:.1f} exceeds {MAX_DELTA_Z} mm threshold")
+        return False, None
+
+    send_robot_command(sock, {"command": "move", "move": [0, 0, -delta_z, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+    time.sleep(0.1)
+
+    # XY alignment
     while True:
         frames = pipeline.wait_for_frames()
         aligned = align.process(frames)
@@ -186,7 +228,7 @@ def auto_align(sock, pipeline, align, target):
             cv2.imshow("Teleop", display)
             if cv2.waitKey(100) & 0xFF == 27:
                 print("Auto-align cancelled")
-                return False
+                return False, delta_z
             continue
 
         sx, sy, sw, sh = screw
@@ -199,12 +241,16 @@ def auto_align(sock, pipeline, align, target):
 
         cv2.putText(display, f"Error: ({err_x}, {err_y}) px",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        dz_text = f"dZ: {delta_z:.1f} mm"
+        (tw, _), _ = cv2.getTextSize(dz_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.putText(display, dz_text, (display.shape[1] - tw - 10, display.shape[0] - 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
         cv2.imshow("Teleop", display)
 
         if abs(err_x) <= ALIGN_TOLERANCE and abs(err_y) <= ALIGN_TOLERANCE:
             print(f"Aligned! Final error: ({err_x}, {err_y}) px")
             cv2.waitKey(500)
-            return True
+            return True, delta_z
 
         move = [0, 0, 0, 0, 0, 0]
         if abs(err_x) > ALIGN_TOLERANCE:
@@ -217,7 +263,7 @@ def auto_align(sock, pipeline, align, target):
 
         if cv2.waitKey(1) & 0xFF == 27:
             print("Auto-align cancelled")
-            return False
+            return False, delta_z
 
 
 def main():
@@ -243,6 +289,7 @@ def main():
     current_depth_mm = None
     robot_pos = None
     last_pos_time = 0
+    last_delta_z = None
 
     print("Teleop ready!")
     print("  W = backward, S = forward")
@@ -318,6 +365,12 @@ def main():
                 cv2.putText(display, f"Calibration Dist: {calibration_z:.1f} mm",
                             (10, display.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
 
+            if last_delta_z is not None:
+                dz_text = f"dZ: {last_delta_z:.1f} mm"
+                (tw, _), _ = cv2.getTextSize(dz_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.putText(display, dz_text, (display.shape[1] - tw - 10, display.shape[0] - 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+
             status = "RAPID CAPTURE ON" if rapid_capture else "R: rapid  C: calib  T: align"
             cv2.putText(display, f"WASD/QE: move  P: photo  {status}  ESC: quit",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
@@ -363,8 +416,8 @@ def main():
                     print("No screw detected! Move closer and try again.")
 
             if key == ord('t'):
-                if target:
-                    auto_align(sock, pipeline, align, target)
+                if target and calibration_z is not None:
+                    _, last_delta_z = auto_align(sock, pipeline, align, target, calibration_z)
                 else:
                     print("No calibration! Align over a screw and press C first.")
 
