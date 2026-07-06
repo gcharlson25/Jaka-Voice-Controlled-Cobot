@@ -106,15 +106,16 @@ def load_calibration():
     if os.path.exists(CALIBRATION_FILE):
         with open(CALIBRATION_FILE, "r") as f:
             data = json.load(f)
-            return (data["target_x"], data["target_y"]), data.get("calibration_z")
-    return None, None
+            cal_pos = data.get("robot_pos")
+            return (data["target_x"], data["target_y"]), data.get("calibration_z"), cal_pos
+    return None, None, None
 
 
-def save_calibration(x, y, cal_z):
+def save_calibration(x, y, cal_z, robot_pos=None):
     os.makedirs(SAVE_DIR, exist_ok=True)
     with open(CALIBRATION_FILE, "w") as f:
-        json.dump({"target_x": x, "target_y": y, "calibration_z": cal_z}, f)
-    print(f"Calibration saved: target pixel = ({x}, {y}), calibration Z = {cal_z:.1f} mm")
+        json.dump({"target_x": x, "target_y": y, "calibration_z": cal_z, "robot_pos": robot_pos}, f)
+    print(f"Calibration saved: target pixel = ({x}, {y}), calibration dist = {cal_z:.1f} mm")
 
 
 def get_depth_at_screw(depth_data, screw):
@@ -238,7 +239,7 @@ def main():
     rapid_capture = False
     last_capture_time = 0
     capture_count = 0
-    target, calibration_z = load_calibration()
+    target, calibration_z, cal_robot_pos = load_calibration()
     current_depth_mm = None
     robot_pos = None
     last_pos_time = 0
@@ -253,7 +254,7 @@ def main():
     print("  T = auto-align to calibrated target")
     print("  ESC = quit")
     if target:
-        print(f"  Loaded calibration: target pixel = ({target[0]}, {target[1]}), calibration Z = {calibration_z}")
+        print(f"  Loaded calibration: target pixel = ({target[0]}, {target[1]}), calibration dist = {calibration_z}")
     else:
         print("  No calibration found. Align over a screw and press C first.")
 
@@ -310,7 +311,11 @@ def main():
                 cv2.drawMarker(display, (target[0], target[1]), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
             if calibration_z is not None:
-                cv2.putText(display, f"Calibration Z: {calibration_z:.1f} mm",
+                if cal_robot_pos is not None:
+                    rx, ry, rz = cal_robot_pos
+                    cv2.putText(display, f"Cal pos  X:{rx:.1f} Y:{ry:.1f} Z:{rz:.1f}",
+                                (10, display.shape[0] - 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+                cv2.putText(display, f"Calibration Dist: {calibration_z:.1f} mm",
                             (10, display.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
 
             status = "RAPID CAPTURE ON" if rapid_capture else "R: rapid  C: calib  T: align"
@@ -352,7 +357,8 @@ def main():
                     sx, sy, sw, sh = screw
                     target = (sx, sy)
                     calibration_z = compute_calibration_z(current_depth_mm) if current_depth_mm is not None else None
-                    save_calibration(sx, sy, calibration_z)
+                    cal_robot_pos = robot_pos[:3] if robot_pos is not None else None
+                    save_calibration(sx, sy, calibration_z, cal_robot_pos)
                 else:
                     print("No screw detected! Move closer and try again.")
 
