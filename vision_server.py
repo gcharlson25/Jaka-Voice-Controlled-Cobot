@@ -19,7 +19,9 @@ STEP = 1
 ALIGN_SPEED = 100
 ALIGN_TOLERANCE = 1
 DEPTH_PROBE_STEP = 80.0
-MAX_DELTA_Z = 60.0
+MAX_DELTA_Z = 100.0
+RECOVERY_STEP = 1.0
+RECOVERY_MAX_STEPS = 20
 
 ALIGN_STEP_BANDS = [
     (100, 5.0),
@@ -185,20 +187,56 @@ def send_robot_command(sock, command):
     return reply
 
 
+def recover_depth_by_climbing(sock, pipeline, align):
+    climbed = 0.0
+    for _ in range(RECOVERY_MAX_STEPS):
+        d = _sample_depth_median(pipeline, align, n_frames=3)
+        if d is not None:
+            return d, climbed
+        send_robot_command(sock, {"command": "move", "move": [0, 0, RECOVERY_STEP, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.1)
+        climbed += RECOVERY_STEP
+    return None, climbed
+
+
+def recover_screw_by_climbing(sock, pipeline, align):
+    for _ in range(RECOVERY_MAX_STEPS):
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
+        if color_frame:
+            image = np.asanyarray(color_frame.get_data())
+            screw = detect_screw(image)
+            if screw is not None:
+                return image, screw
+        send_robot_command(sock, {"command": "move", "move": [0, 0, RECOVERY_STEP, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.1)
+    return None, None
+
+
 def auto_align(sock, pipeline, align, target, calibration_z):
     target_x, target_y = target
     print(f"Auto-aligning to target pixel ({target_x}, {target_y})...")
     print("Press ESC to cancel")
 
     d = _sample_depth_median(pipeline, align)
+    climbed = 0.0
     if d is None:
-        print("Z probe failed: no depth reading")
-        return False, None
+        print("Z probe failed: no depth reading, climbing to recover...")
+        d, climbed = recover_depth_by_climbing(sock, pipeline, align)
+        if d is None:
+            print("Z probe failed: no depth reading after recovery attempts")
+            return False, None
 
     X = compute_calibration_z(d)
     if X is None:
         print(f"Z probe failed: depth {d:.1f} too small for geometry")
         return False, None
+
+    if climbed > 0:
+        send_robot_command(sock, {"command": "move", "move": [0, 0, -climbed, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.1)
+        X -= climbed
 
     delta_z = X - calibration_z
     if abs(delta_z) > MAX_DELTA_Z:
@@ -223,13 +261,19 @@ def auto_align(sock, pipeline, align, target, calibration_z):
         cv2.drawMarker(display, (target_x, target_y), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
         if screw is None:
-            cv2.putText(display, "NO SCREW DETECTED",
+            cv2.putText(display, "NO SCREW DETECTED - recovering",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             cv2.imshow("Teleop", display)
-            if cv2.waitKey(100) & 0xFF == 27:
+            if cv2.waitKey(1) & 0xFF == 27:
                 print("Auto-align cancelled")
                 return False, delta_z
-            continue
+
+            image, screw = recover_screw_by_climbing(sock, pipeline, align)
+            if screw is None:
+                if cv2.waitKey(100) & 0xFF == 27:
+                    print("Auto-align cancelled")
+                    return False, delta_z
+                continue
 
         sx, sy, sw, sh = screw
         cv2.rectangle(display, (sx - sw // 2, sy - sh // 2), (sx + sw // 2, sy + sh // 2), (0, 255, 0), 2)
