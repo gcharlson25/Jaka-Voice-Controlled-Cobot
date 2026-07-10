@@ -1,0 +1,585 @@
+
+import pyrealsense2 as rs
+import numpy as np
+import cv2
+import os
+import sys
+import time
+import json
+import socket
+import struct
+from ultralytics import YOLO
+
+HOST = "127.0.0.1"
+PORT = 9100
+
+SPEED = 250
+STEP = 1
+
+ALIGN_SPEED = 100
+ALIGN_TOLERANCE = 1
+DEPTH_PROBE_STEP = 80.0
+MAX_DELTA_Z = 100.0
+RECOVERY_STEP = 1.0
+RECOVERY_MAX_STEPS = 20
+
+ALIGN_STEP_BANDS = [
+    (100, 5.0),
+    (50, 2.0),
+    (20, 1.0),
+    (10, 0.5),
+    (5, 0.1),
+    (0, 0.05),
+]
+
+PIXEL_X_TO_ROBOT_DIR = 1
+PIXEL_Y_TO_ROBOT_DIR = 1
+
+CAMERA_HORIZ_OFFSET = 91.0   # mm, horizontal distance from camera to tool tip
+CAMERA_VERT_OFFSET = 95.0   # mm, vertical distance from camera to tool tip
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SAVE_DIR = os.path.join(BASE_DIR, "mounted_screw")
+CALIBRATION_FILE = os.path.join(SAVE_DIR, "calibration.json")
+MODEL_PATH = os.path.join(BASE_DIR, "runs", "detect", "head_detect", "weights", "best.pt")
+
+# ChArUco board + camera intrinsics (from charuco_calibration work)
+CAMERA_CALIBRATION_FILE = os.path.join(BASE_DIR, "charuco_calibration", "camera_calibration.json")
+
+# Trigger file written by full_voice_main.py; actions map to synthetic keypresses
+VISION_COMMAND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_command.json")
+VOICE_KEY_MAP = {"calibrate": ord('c'), "align": ord('t')}
+SQUARES_X = 4
+SQUARES_Y = 5
+SQUARE_LENGTH_MM = 50.0
+MARKER_LENGTH_MM = 37.0
+ARUCO_DICT = cv2.aruco.DICT_4X4_50
+
+model = YOLO(MODEL_PATH)
+
+click_points = []
+
+
+def on_mouse(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        if len(click_points) >= 2:
+            click_points.clear()
+        click_points.append((x, y))
+
+
+def deproject(u, v, depth_mm, camera_matrix):
+    fx = camera_matrix[0][0]
+    fy = camera_matrix[1][1]
+    cx = camera_matrix[0][2]
+    cy = camera_matrix[1][2]
+    z = depth_mm
+    x = (u - cx) * z / fx
+    y = (v - cy) * z / fy
+    return np.array([x, y, z])
+
+
+def get_depth_mm(depth_frame, u, v):
+    d = depth_frame.get_distance(u, v)
+    return d * 1000.0 if d > 0 else None
+
+
+def load_camera_calibration():
+    if os.path.exists(CAMERA_CALIBRATION_FILE):
+        with open(CAMERA_CALIBRATION_FILE, "r") as f:
+            calib = json.load(f)
+        print(f"Loaded camera calibration: fx={calib['camera_matrix'][0][0]:.1f}")
+        return calib["camera_matrix"]
+    print("WARNING: no camera_calibration.json found - click-to-measure disabled.")
+    return None
+
+CONTROLS = {
+    ord('w'): [0, -STEP, 0, 0, 0, 0],
+    ord('s'): [0, STEP, 0, 0, 0, 0],
+    ord('d'): [-STEP, 0, 0, 0, 0, 0],
+    ord('a'): [STEP, 0, 0, 0, 0, 0],
+    ord('e'): [0, 0, STEP, 0, 0, 0],
+    ord('q'): [0, 0, -STEP, 0, 0, 0],
+}
+
+
+def send_msg(sock, msg):
+    data = json.dumps(msg).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(data)) + data)
+
+
+def recv_msg(sock):
+    raw = _recv_exact(sock, 4)
+    if raw is None:
+        return None
+    length = struct.unpack("!I", raw)[0]
+    data = _recv_exact(sock, length)
+    if data is None:
+        return None
+    return json.loads(data.decode("utf-8"))
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def detect_screw(image):
+    results = model(image, verbose=False, conf=0.3)
+    boxes = results[0].boxes
+    if len(boxes) == 0:
+        return None
+    cx, cy = image.shape[1] // 2, image.shape[0] // 2
+    best = None
+    best_dist = float("inf")
+    for box in boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        bx, by = int((x1 + x2) / 2), int((y1 + y2) / 2)
+        dist = (bx - cx) ** 2 + (by - cy) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best = (bx, by, int(x2 - x1), int(y2 - y1))
+    return best
+
+
+def compute_calibration_z(depth_mm):
+    inner = depth_mm ** 2 - CAMERA_HORIZ_OFFSET ** 2
+    if inner < 0:
+        return None
+    return -CAMERA_VERT_OFFSET + np.sqrt(inner)
+
+
+def load_calibration():
+    if os.path.exists(CALIBRATION_FILE):
+        with open(CALIBRATION_FILE, "r") as f:
+            data = json.load(f)
+            cal_pos = data.get("robot_pos")
+            return (data["target_x"], data["target_y"]), data.get("calibration_z"), cal_pos
+    return None, None, None
+
+
+def save_calibration(x, y, cal_z, robot_pos=None):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    with open(CALIBRATION_FILE, "w") as f:
+        json.dump({"target_x": x, "target_y": y, "calibration_z": cal_z, "robot_pos": robot_pos}, f)
+    dist_str = f"{cal_z:.1f} mm" if cal_z is not None else "None"
+    print(f"Calibration saved: target pixel = ({x}, {y}), calibration dist = {dist_str}")
+
+
+def get_depth_at_screw(depth_data, screw):
+    sx, sy, sw, sh = screw
+    h, w = depth_data.shape
+    r = max(sw, sh) // 4
+    samples = []
+    for angle_deg in range(0, 360, 20):
+        rad = np.radians(angle_deg)
+        for frac in [0.0, 0.5]:
+            px = int(sx + r * frac * np.cos(rad))
+            py = int(sy + r * frac * np.sin(rad))
+            if 0 <= px < w and 0 <= py < h:
+                val = depth_data[py, px]
+                if val > 0:
+                    samples.append(float(val))
+    return float(np.median(samples)) if samples else None
+
+
+hole_fill = rs.hole_filling_filter()
+
+
+def _sample_depth_median(pipeline, align, n_frames=5):
+    samples = []
+    for _ in range(n_frames):
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
+        depth_frame = aligned.get_depth_frame()
+        if not color_frame or not depth_frame:
+            continue
+        image = np.asanyarray(color_frame.get_data())
+        filled = hole_fill.process(depth_frame)
+        depth_data = np.asanyarray(filled.get_data())
+        screw = detect_screw(image)
+        if screw is None:
+            continue
+        d = get_depth_at_screw(depth_data, screw)
+        if d is not None and 100 <= d <= 400:
+            samples.append(d)
+    return float(np.median(samples)) if samples else None
+
+
+def setup_camera():
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    pipeline.start(config)
+    align = rs.align(rs.stream.color)
+    return pipeline, align
+
+
+def get_step_size(err_px):
+    err_px = abs(err_px)
+    for threshold, step_mm in ALIGN_STEP_BANDS:
+        if err_px > threshold:
+            return step_mm
+    return ALIGN_STEP_BANDS[-1][1]
+
+
+def send_robot_command(sock, command):
+    send_msg(sock, command)
+    reply = recv_msg(sock)
+    return reply
+
+
+def recover_depth_by_climbing(sock, pipeline, align):
+    climbed = 0.0
+    for _ in range(RECOVERY_MAX_STEPS):
+        d = _sample_depth_median(pipeline, align, n_frames=3)
+        if d is not None:
+            return d, climbed
+        send_robot_command(sock, {"command": "move", "move": [0, 0, RECOVERY_STEP, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.1)
+        climbed += RECOVERY_STEP
+    return None, climbed
+
+
+def recover_screw_by_climbing(sock, pipeline, align):
+    for _ in range(RECOVERY_MAX_STEPS):
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
+        if color_frame:
+            image = np.asanyarray(color_frame.get_data())
+            screw = detect_screw(image)
+            if screw is not None:
+                return image, screw
+        send_robot_command(sock, {"command": "move", "move": [0, 0, RECOVERY_STEP, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.1)
+    return None, None
+
+
+def auto_align(sock, pipeline, align, target, calibration_z):
+    target_x, target_y = target
+    print(f"Auto-aligning to target pixel ({target_x}, {target_y})...")
+    print("Press ESC to cancel")
+
+    d = _sample_depth_median(pipeline, align)
+    climbed = 0.0
+    if d is None:
+        print("Z probe failed: no depth reading, climbing to recover...")
+        d, climbed = recover_depth_by_climbing(sock, pipeline, align)
+        if d is None:
+            print("Z probe failed: no depth reading after recovery attempts")
+            return False, None
+
+    X = compute_calibration_z(d)
+    if X is None:
+        print(f"Z probe failed: depth {d:.1f} too small for geometry")
+        return False, None
+
+    if climbed > 0:
+        send_robot_command(sock, {"command": "move", "move": [0, 0, -climbed, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.1)
+        X -= climbed
+
+    delta_z = X - calibration_z
+    if abs(delta_z) > MAX_DELTA_Z:
+        print(f"Z probe rejected: delta_z {delta_z:.1f} exceeds {MAX_DELTA_Z} mm threshold")
+        return False, None
+
+    send_robot_command(sock, {"command": "move", "move": [0, 0, -delta_z, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+    time.sleep(0.1)
+
+    # XY alignment
+    while True:
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
+        if not color_frame:
+            continue
+
+        image = np.asanyarray(color_frame.get_data())
+        screw = detect_screw(image)
+
+        display = image.copy()
+        cv2.drawMarker(display, (target_x, target_y), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
+
+        if screw is None:
+            cv2.putText(display, "NO SCREW DETECTED - recovering",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.imshow("Teleop", display)
+            if cv2.waitKey(1) & 0xFF == 27:
+                print("Auto-align cancelled")
+                return False, delta_z
+
+            image, screw = recover_screw_by_climbing(sock, pipeline, align)
+            if screw is None:
+                if cv2.waitKey(100) & 0xFF == 27:
+                    print("Auto-align cancelled")
+                    return False, delta_z
+                continue
+
+        sx, sy, sw, sh = screw
+        cv2.rectangle(display, (sx - sw // 2, sy - sh // 2), (sx + sw // 2, sy + sh // 2), (0, 255, 0), 2)
+        cv2.circle(display, (sx, sy), 3, (0, 255, 0), -1)
+        cv2.line(display, (sx, sy), (target_x, target_y), (255, 0, 0), 2)
+
+        err_x = sx - target_x
+        err_y = sy - target_y
+
+        cv2.putText(display, f"Error: ({err_x}, {err_y}) px",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        dz_text = f"dZ: {delta_z:.1f} mm"
+        (tw, _), _ = cv2.getTextSize(dz_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        cv2.putText(display, dz_text, (display.shape[1] - tw - 10, display.shape[0] - 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+        cv2.imshow("Teleop", display)
+
+        if abs(err_x) <= ALIGN_TOLERANCE and abs(err_y) <= ALIGN_TOLERANCE:
+            print(f"Aligned! Final error: ({err_x}, {err_y}) px")
+            cv2.waitKey(500)
+            return True, delta_z
+
+        move = [0, 0, 0, 0, 0, 0]
+        if abs(err_x) > ALIGN_TOLERANCE:
+            move[1] = get_step_size(err_x) * PIXEL_X_TO_ROBOT_DIR * (1 if err_x > 0 else -1)
+        if abs(err_y) > ALIGN_TOLERANCE:
+            move[0] = get_step_size(err_y) * PIXEL_Y_TO_ROBOT_DIR * (1 if err_y > 0 else -1)
+
+        send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
+        time.sleep(0.25)
+
+        if cv2.waitKey(1) & 0xFF == 27:
+            print("Auto-align cancelled")
+            return False, delta_z
+
+
+def main():
+    print(f"Connecting to robot client at {HOST}:{PORT}...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect((HOST, PORT))
+    except ConnectionRefusedError:
+        print("ERROR: Could not connect. Start robot_client.py first.")
+        sys.exit(1)
+    print("Connected to robot client.")
+
+    send_robot_command(sock, {"command": "setup"})
+
+    pipeline, align = setup_camera()
+    cv2.namedWindow("Teleop", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Teleop", 1280, 960)
+    cv2.setMouseCallback("Teleop", on_mouse)
+
+    camera_matrix = load_camera_calibration()
+    dictionary = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
+    charuco_board = cv2.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH_MM, MARKER_LENGTH_MM, dictionary)
+    charuco_detector = cv2.aruco.CharucoDetector(charuco_board)
+
+    target, calibration_z, cal_robot_pos = load_calibration()
+    current_depth_mm = None
+    robot_pos = None
+    last_pos_time = 0
+    last_delta_z = None
+
+    print("Teleop ready!")
+    print("  W = backward, S = forward")
+    print("  A = left,     D = right")
+    print("  Q = down,     E = up")
+    print("  C = calibrate (align tool over screw, then press C)")
+    print("  T = auto-align to calibrated target")
+    print("  Click two points = measure real-world distance")
+    print("  ESC = quit")
+    if target:
+        print(f"  Loaded calibration: target pixel = ({target[0]}, {target[1]}), calibration dist = {calibration_z}")
+    else:
+        print("  No calibration found. Align over a screw and press C first.")
+
+    try:
+        while True:
+            frames = pipeline.wait_for_frames()
+            aligned = align.process(frames)
+            color_frame = aligned.get_color_frame()
+            depth_frame = aligned.get_depth_frame()
+            if not color_frame:
+                continue
+
+            image = np.asanyarray(color_frame.get_data())
+            if depth_frame:
+                filled = hole_fill.process(depth_frame)
+                depth_data = np.asanyarray(filled.get_data())
+            else:
+                depth_data = None
+            display = image.copy()
+
+            current_depth_mm = None
+            screw = detect_screw(image)
+            if screw:
+                sx, sy, sw, sh = screw
+                cv2.rectangle(display, (sx - sw // 2, sy - sh // 2), (sx + sw // 2, sy + sh // 2), (0, 255, 0), 2)
+                cv2.circle(display, (sx, sy), 3, (0, 255, 0), -1)
+                if depth_data is not None:
+                    depth_mm = get_depth_at_screw(depth_data, screw)
+                    if depth_mm is not None and 100 <= depth_mm <= 400:
+                        current_depth_mm = depth_mm
+                        depth_label = f"Depth: {depth_mm:.0f} mm"
+                        depth_color = (0, 255, 255)
+                    else:
+                        depth_label = "Depth: --- mm"
+                        depth_color = (0, 128, 255)
+                    cv2.putText(display, depth_label, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, depth_color, 2)
+
+            # ChArUco board recognition (markers + corner IDs + accuracy check)
+            charuco_corners, charuco_ids, marker_corners, marker_ids = charuco_detector.detectBoard(image)
+
+            if marker_ids is not None and len(marker_ids) > 0:
+                cv2.aruco.drawDetectedMarkers(display, marker_corners, marker_ids)
+                n_corners = 0 if charuco_corners is None else len(charuco_corners)
+                cv2.putText(display, f"Markers: {len(marker_ids)}   Board corners: {n_corners}",
+                            (10, display.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+
+            if charuco_corners is not None and len(charuco_corners) >= 2:
+                cv2.aruco.drawDetectedCornersCharuco(display, charuco_corners, charuco_ids, (0, 255, 0))
+
+                if camera_matrix is not None and depth_frame:
+                    ids_flat = charuco_ids.flatten()
+                    board_cols = SQUARES_X - 1
+                    errors = []
+                    for i in range(len(ids_flat)):
+                        for j in range(i + 1, len(ids_flat)):
+                            id_a, id_b = ids_flat[i], ids_flat[j]
+                            row_a, col_a = divmod(id_a, board_cols)
+                            row_b, col_b = divmod(id_b, board_cols)
+                            # only compare corners exactly one square apart (horiz or vert neighbor)
+                            if (row_a == row_b and abs(col_a - col_b) == 1) or (col_a == col_b and abs(row_a - row_b) == 1):
+                                u_a, v_a = charuco_corners[i][0]
+                                u_b, v_b = charuco_corners[j][0]
+                                d_a = get_depth_mm(depth_frame, int(u_a), int(v_a))
+                                d_b = get_depth_mm(depth_frame, int(u_b), int(v_b))
+                                if d_a and d_b:
+                                    p_a = deproject(u_a, v_a, d_a, camera_matrix)
+                                    p_b = deproject(u_b, v_b, d_b, camera_matrix)
+                                    errors.append(np.linalg.norm(p_a - p_b) - SQUARE_LENGTH_MM)
+
+                    if errors:
+                        avg_err = sum(errors) / len(errors)
+                        pct_err = (avg_err / SQUARE_LENGTH_MM) * 100
+                        cv2.putText(display, f"Board check: {SQUARE_LENGTH_MM:.0f}mm squares, "
+                                             f"err {avg_err:+.1f}mm ({pct_err:+.1f}%) n={len(errors)}",
+                                    (10, display.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+
+            # Click-to-measure (two points -> real-world mm distance)
+            if len(click_points) == 1:
+                cv2.circle(display, click_points[0], 2, (0, 0, 255), -1)
+            elif len(click_points) == 2:
+                for pt in click_points:
+                    cv2.circle(display, pt, 2, (0, 0, 255), -1)
+                cv2.line(display, click_points[0], click_points[1], (0, 0, 255), 2)
+
+                if camera_matrix is not None and depth_frame:
+                    u1, v1 = click_points[0]
+                    u2, v2 = click_points[1]
+                    d1 = get_depth_mm(depth_frame, u1, v1)
+                    d2 = get_depth_mm(depth_frame, u2, v2)
+                    if d1 and d2:
+                        p1 = deproject(u1, v1, d1, camera_matrix)
+                        p2 = deproject(u2, v2, d2, camera_matrix)
+                        dist = np.linalg.norm(p1 - p2)
+                        cv2.putText(display, f"Distance: {dist:.1f} mm",
+                                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    else:
+                        cv2.putText(display, "No depth at click point(s)",
+                                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                else:
+                    cv2.putText(display, "No camera calibration - measure disabled",
+                                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+            now = time.time()
+            if now - last_pos_time >= 0.2:
+                reply = send_robot_command(sock, {"command": "get_position"})
+                if reply and reply.get("status") == "ok":
+                    robot_pos = reply["position"]
+                last_pos_time = now
+
+            if robot_pos is not None:
+                x, y, z = robot_pos[0], robot_pos[1], robot_pos[2]
+                pos_lines = [f"X: {x:.1f}", f"Y: {y:.1f}", f"Z: {z:.1f}"]
+                for i, line in enumerate(pos_lines):
+                    (tw, _), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.putText(display, line, (display.shape[1] - tw - 10, 30 + i * 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            if target:
+                cv2.drawMarker(display, (target[0], target[1]), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
+
+            if calibration_z is not None:
+                if cal_robot_pos is not None:
+                    rx, ry, rz = cal_robot_pos
+                    cv2.putText(display, f"Cal pos  X:{rx:.1f} Y:{ry:.1f} Z:{rz:.1f}",
+                                (10, display.shape[0] - 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+                cv2.putText(display, f"Calibration Dist: {calibration_z:.1f} mm",
+                            (10, display.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+
+            if last_delta_z is not None:
+                dz_text = f"dZ: {last_delta_z:.1f} mm"
+                (tw, _), _ = cv2.getTextSize(dz_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.putText(display, dz_text, (display.shape[1] - tw - 10, display.shape[0] - 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+
+            cv2.putText(display, "WASD/QE: move  C: calib  T: align  Click x2: measure  ESC: quit",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
+
+            cv2.imshow("Teleop", display)
+
+            key = cv2.waitKey(1) & 0xFF
+
+            # voice-triggered actions arrive as a file and act like a keypress
+            if os.path.exists(VISION_COMMAND_FILE):
+                try:
+                    with open(VISION_COMMAND_FILE, "r") as f:
+                        action = json.load(f).get("action")
+                    os.remove(VISION_COMMAND_FILE)
+                    if action in VOICE_KEY_MAP:
+                        key = VOICE_KEY_MAP[action]
+                        print(f"Voice command received: {action}")
+                except Exception as e:
+                    print(f"Bad vision command file: {e}")
+
+            if key == 27:
+                break
+
+            if key == ord('c'):
+                if screw is None:
+                    print("No screw detected! Move closer and try again.")
+                elif current_depth_mm is None:
+                    print("No valid depth reading - wait for the depth overlay to show a value, then calibrate.")
+                else:
+                    sx, sy, sw, sh = screw
+                    target = (sx, sy)
+                    calibration_z = compute_calibration_z(current_depth_mm)
+                    cal_robot_pos = robot_pos[:3] if robot_pos is not None else None
+                    save_calibration(sx, sy, calibration_z, cal_robot_pos)
+
+            if key == ord('t'):
+                if target and calibration_z is not None:
+                    _, last_delta_z = auto_align(sock, pipeline, align, target, calibration_z)
+                else:
+                    print("No calibration! Align over a screw and press C first.")
+
+            if key in CONTROLS:
+                move = CONTROLS[key]
+                print(f"Moving: {move}")
+                send_robot_command(sock, {"command": "move", "move": move, "speed": SPEED, "blocking": False})
+    finally:
+        send_robot_command(sock, {"command": "shutdown"})
+        sock.close()
+        pipeline.stop()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()

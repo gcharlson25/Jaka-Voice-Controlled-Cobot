@@ -17,3 +17,4 @@ runs/
 charuco_calibration/images/
 charuco_calibration/board_photo.jpg
 charuco_calibration/camera_calibration.json
+vision_command.json
