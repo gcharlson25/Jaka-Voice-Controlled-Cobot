@@ -183,13 +183,7 @@ def _extract_speed(command, default=500):
     return default
 
 def parse_response(text, command=""):
-    # Strip markdown code fences
     text = re.sub(r'```[a-z]*\n?', '', text).strip()
-
-    # Circle drawing: let the proven radius-based handler in robot_control.py
-    # do the math instead of relying on the model to write correct arc geometry.
-    # Plane and speed come from the voice command since the model's generated
-    # code always mirrors the xy/100-speed example regardless of what's asked.
     if "circular_move" in text:
         radius = _extract_radius(text)
         plane = _extract_plane(command)
@@ -202,7 +196,6 @@ def parse_response(text, command=""):
         exec(text, ns)
         return proxy.calls
     except _NeedsRealCobot:
-        # Script needs the real cobot for position queries — send as-is
         return [{"function": "execute_script", "script": text}]
     except Exception as e:
         print(f"Failed to parse response: {e}")

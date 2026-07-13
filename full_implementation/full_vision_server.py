@@ -35,18 +35,16 @@ ALIGN_STEP_BANDS = [
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
 
-CAMERA_HORIZ_OFFSET = 91.0   # mm, horizontal distance from camera to tool tip
-CAMERA_VERT_OFFSET = 95.0   # mm, vertical distance from camera to tool tip
+CAMERA_HORIZ_OFFSET = 91.0   
+CAMERA_VERT_OFFSET = 95.0   
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAVE_DIR = os.path.join(BASE_DIR, "mounted_screw")
 CALIBRATION_FILE = os.path.join(SAVE_DIR, "calibration.json")
 MODEL_PATH = os.path.join(BASE_DIR, "runs", "detect", "head_detect", "weights", "best.pt")
 
-# ChArUco board + camera intrinsics (from charuco_calibration work)
 CAMERA_CALIBRATION_FILE = os.path.join(BASE_DIR, "charuco_calibration", "camera_calibration.json")
 
-# Trigger file written by full_voice_main.py; actions map to synthetic keypresses
 VISION_COMMAND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_command.json")
 VOICE_KEY_MAP = {"calibrate": ord('c'), "align": ord('t')}
 SQUARES_X = 4
@@ -294,7 +292,6 @@ def auto_align(sock, pipeline, align, target, calibration_z):
     send_robot_command(sock, {"command": "move", "move": [0, 0, -delta_z, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
     time.sleep(0.1)
 
-    # XY alignment
     while True:
         frames = pipeline.wait_for_frames()
         aligned = align.process(frames)
@@ -537,7 +534,6 @@ def main():
 
             key = cv2.waitKey(1) & 0xFF
 
-            # voice-triggered actions arrive as a file and act like a keypress
             if os.path.exists(VISION_COMMAND_FILE):
                 try:
                     with open(VISION_COMMAND_FILE, "r") as f:

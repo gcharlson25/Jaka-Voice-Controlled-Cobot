@@ -161,30 +161,6 @@ def fastenAll(cobot):
     fastenScrew4(cobot)
     fastenScrew5(cobot)
 
-def unfastenThenFasten(cobot):
-    unfastenScrew1(cobot)
-    unfastenScrew2(cobot)
-    unfastenScrew3(cobot)
-    unfastenScrew4(cobot)
-    unfastenScrew5(cobot)    
-    fastenScrew1(cobot)
-    fastenScrew2(cobot)
-    fastenScrew3(cobot)
-    fastenScrew4(cobot)
-    fastenScrew5(cobot)
-
-def allOneAtATime(cobot):
-    unfastenScrew1(cobot)
-    fastenScrew1(cobot)
-    unfastenScrew2(cobot)
-    fastenScrew2(cobot)
-    unfastenScrew3(cobot)
-    fastenScrew3(cobot)
-    unfastenScrew4(cobot)
-    fastenScrew4(cobot)
-    unfastenScrew5(cobot)
-    fastenScrew5(cobot)
-
 def main():
     cobot = cobotSetup()
     cobot.joint_move(HOME_JOINT, ABS_MOVEMENT, True, 2)

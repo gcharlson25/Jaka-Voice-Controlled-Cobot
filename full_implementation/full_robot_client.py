@@ -96,7 +96,6 @@ def setup_robot():
 
 def execute_move(cobot, command):
     try:
-        # plain list from keyword parser
         if isinstance(command, list):
             print("Executing move: {}".format(command))
             cobot.linear_move(command, INCR, False, 500)
@@ -115,8 +114,6 @@ def execute_move(cobot, command):
                 "IO_CABINET": 0, "IO_TOOL": 1, "IO_EXTEND": 2,
             }
 
-            # Pre-fetch current position so the script can use x,y,z,rx,ry,rz
-            # even if it doesn't capture get_tcp_position()'s return value itself
             err, pos = cobot.get_tcp_position()
             if err == 0:
                 x, y, z, rx, ry, rz = pos
@@ -131,7 +128,6 @@ def execute_move(cobot, command):
             print("Script complete")
             return
 
-        # positional-args format from llm_finetuned: {"function": ..., "args": [...]}
         if "args" in command:
             args = command["args"]
             if func == "linear_move":
@@ -156,14 +152,7 @@ def execute_move(cobot, command):
                 print("Unknown function: {}".format(func))
             return
 
-        if func == "linear_move":
-            end_pos = command["end_pos"]
-            speed = command.get("speed", 500)
-            print("Executing linear_move: {} at {}mm/s".format(end_pos, speed))
-            cobot.linear_move(end_pos, INCR, False, speed)
-            print("Move complete")
-
-        elif func == "circular_move":
+        if func == "circular_move":
             ret = cobot.get_tcp_position()
             if ret[0] != 0:
                 print("Error getting TCP position: {}".format(ret[0]))

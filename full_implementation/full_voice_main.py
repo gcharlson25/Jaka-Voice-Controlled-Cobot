@@ -6,12 +6,9 @@ import numpy as np
 import sounddevice as sd
 import whisper
 
-from full_tools import execute_command, execute_finetuned_command, execute_screw_command, connect_robot    #comment to switch to function calling
+from full_tools import execute_command, execute_finetuned_command, execute_screw_command, connect_robot
 from full_llm_finetuned import ask_llm, _backend_name
-# from full_tools import execute_command, execute_llm_command, connect_robot    #comment to switch to gpt prompt
-# from full_llm import ask_llm, _backend_name
 
-# Trigger file read by full_vision_server.py (voice -> vision bridge)
 VISION_COMMAND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_command.json")
 
 def send_vision_command(action):
@@ -162,17 +159,10 @@ while True:
                 execute_command(parsed)
     else:
         print("Sending to LLM...")
-        tool_results = ask_llm(command)     #comment to switch to function calling
+        tool_results = ask_llm(command)
         if not tool_results:
             print("Invalid instruction.")
             continue
         print(f"{_backend_name}: {tool_results}")
         for tool_result in tool_results:
             execute_finetuned_command(tool_result)
-
-        # tool_result = ask_llm(command)   #comment to switch to gpt prompt
-        # if tool_result is None:
-        #     print("Invalid instruction.")
-        #     continue
-        # print(f"{_backend_name}: {tool_result}")
-        # execute_llm_command(tool_result)
