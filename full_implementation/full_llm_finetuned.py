@@ -30,13 +30,27 @@ SYSTEM_PROMPT = (
     "User frame: [0, 0, 0, 0, 0, 0] \n\n"
     "HOME POSITION (SAFE):\n"
     "cobot.joint_move([math.radians(x) for x in [-92.059, 58.642, 135.473, -35.255, -93.233, -40.562]], ABS, True, 1.5)\n\n"
+    "SAFE JOINT RANGES (degrees) - NEVER command a joint outside its range,\n"
+    "the controller will reject the move:\n"
+    "J1: -140 to -15\n"
+    "J2: 30 to 90\n"
+    "J3: 50 to 150\n"
+    "J4: -65 to 55\n"
+    "J5: -200 to -45\n"
+    "J6: -90 to 10\n"
+    "For expressive multi-move requests (dance, wave, wiggle), keep joint\n"
+    "changes small - within about 15 degrees of the current pose per move.\n"
+    "NEVER use while loops, time-based loops, or unbounded repetition.\n"
+    "Respond with a fixed sequence of at most 20 moves per command.\n"
+    "If the user gives a duration, interpret it as repetition: each move takes\n"
+    "roughly 1-2 seconds, so e.g. 'for 10 seconds' means about 6-8 moves.\n\n"
     "COORDINATE CONVENTIONS (base frame):\n"
     "- Up: +Z, Down: -Z\n"
     "- Right: +X, Left: -X\n"
     "- Forward: +Y, Backward: -Y\n\n"
     "--- CONSTANTS ---\n"
     "IO_CABINET = 0\n"
-    "IO_TOOL = 1 (Tool IO should never be used, everything goes through the cabinet)\n"
+    "IO_TOOL = 1 (the screwdriver tool outputs live on tool IO: index 1 = spin GO, index 2 = DIRECTION)\n"
     "IO_EXTEND = 2\n"
     "ABS = 0\n"
     "INCR = 1\n\n"
@@ -124,7 +138,9 @@ SYSTEM_PROMPT = (
     "- cobot.linear_move([S, 0, 0, 0, 0, 0], INCR, True, 500)\n"
     "- cobot.linear_move([-S/2, S*(√3/2), 0, 0, 0, 0], INCR, True, 500)\n"
     "- cobot.linear_move([-S/2, -S*(√3/2), 0, 0, 0, 0], INCR, True, 500)\n\n"
-    "SCREWDRIVER IO CONTROL (IO_CABINET):\n"
+    "SCREWDRIVER IO CONTROL (tool IO, iotype=1; index 1 = spin GO, index 2 = DIRECTION):\n"
+    "If the user says spin, spin the screwdriver, turn on fastening/unfastening, or similar,\n"
+    "they mean these tool outputs - no arm motion, just the screwdriver motor.\n"
     "Before turning on fastening or unfastening, make sure to turn the other way off first\n"
     "To start fastening:       cobot.set_digital_output(1, 2, 0) and then cobot.set_digital_output(1, 1, 1)\n"
     "To stop fastening:    cobot.set_digital_output(1, 1, 0) and then cobot.set_digital_output(1, 2, 0)\n"
@@ -134,6 +150,8 @@ SYSTEM_PROMPT = (
     "each move completes before the next begins.\n\n"
     "Respond with only the cobot function calls, one per line, no explanation."
 )
+
+MAX_COMMANDS_PER_REQUEST = 20
 
 class _NeedsRealCobot(Exception):
     pass
@@ -194,6 +212,10 @@ def parse_response(text, command=""):
     ns = {**_EXEC_NAMESPACE, "cobot": proxy}
     try:
         exec(text, ns)
+        if len(proxy.calls) > MAX_COMMANDS_PER_REQUEST:
+            print(f"Rejected: LLM generated {len(proxy.calls)} commands "
+                  f"(max {MAX_COMMANDS_PER_REQUEST}).")
+            return []
         return proxy.calls
     except _NeedsRealCobot:
         return [{"function": "execute_script", "script": text}]

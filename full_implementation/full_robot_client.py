@@ -29,12 +29,44 @@ INCR = 1
 TCP = [0, 0, 0, 0, 0, 0]
 USR = [0, 0, 0, 0, 0, 0]
 
+# Per-joint safe envelope in DEGREES (min, max), joints 1-6, measured on the cell.
+# Enforced on LLM-generated joint moves only; taught screw routines are trusted.
+JOINT_LIMITS_DEG = [
+    (-140, -15),   # J1
+    (  30,  90),   # J2
+    (  50, 150),   # J3
+    ( -65,  55),   # J4
+    (-200, -45),   # J5
+    ( -90,  10),   # J6
+]
+JOINT_LIMITS = [(math.radians(lo), math.radians(hi)) for lo, hi in JOINT_LIMITS_DEG]
+
 cobot = None
 cmd_lock = threading.Lock()
 
 
+def check_joint_limits(joint_pos, mode):
+    """Validate a joint move target (radians) against the safe envelope.
+
+    Returns None if safe, otherwise a human-readable reason string.
+    Incremental moves are validated against live current joints + delta.
+    """
+    if mode == INCR:
+        err, current = cobot.get_joint_position()
+        if err != 0:
+            return "could not read current joints to validate incremental move"
+        targets = [c + d for c, d in zip(current, joint_pos)]
+    else:
+        targets = list(joint_pos)
+    for i, (t, (lo, hi)) in enumerate(zip(targets, JOINT_LIMITS)):
+        if not (lo <= t <= hi):
+            return ("joint {} target {:.1f} deg is outside safe range [{:.0f}, {:.0f}] deg"
+                    .format(i + 1, math.degrees(t), math.degrees(lo), math.degrees(hi)))
+    return None
+
+
 class _LoggingCobot:
-    """Wraps cobot so any (errcode, ...) result with errcode != 0 gets printed."""
+    """Wraps cobot: enforces joint safety limits and prints any nonzero errcode."""
     def __init__(self, cobot):
         self._cobot = cobot
     def __getattr__(self, name):
@@ -42,6 +74,10 @@ class _LoggingCobot:
         if not callable(attr):
             return attr
         def wrapper(*args, **kwargs):
+            if name == "joint_move" and len(args) >= 2:
+                reason = check_joint_limits(args[0], args[1])
+                if reason is not None:
+                    raise RuntimeError("SAFETY REJECTED joint_move: {}".format(reason))
             result = attr(*args, **kwargs)
             if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], int) and result[0] != 0:
                 print("WARNING: cobot.{}{} returned errcode {}".format(name, args, result[0]))
@@ -99,7 +135,7 @@ def execute_move(cobot, command):
         if isinstance(command, list):
             print("Executing move: {}".format(command))
             cobot.linear_move(command, INCR, False, 500)
-            print("Move complete")
+            print("Move complete\n")
             return
 
         func = command.get("function", "linear_move")
@@ -134,12 +170,16 @@ def execute_move(cobot, command):
                 end_pos, mode, _, speed = args[0], args[1], args[2], args[3]
                 print("Executing linear_move: {} mode={} speed={}".format(end_pos, mode, speed))
                 cobot.linear_move(end_pos, mode, True, speed)
-                print("Move complete")
+                print("Move complete\n")
             elif func == "joint_move":
                 joint_pos, mode, _, speed = args[0], args[1], args[2], args[3]
+                reason = check_joint_limits(joint_pos, mode)
+                if reason is not None:
+                    print("SAFETY REJECTED joint_move: {}".format(reason))
+                    return
                 print("Executing joint_move: {} speed={}".format(joint_pos, speed))
                 cobot.joint_move(joint_pos, mode, True, speed)
-                print("Move complete")
+                print("Move complete\n")
             elif func == "set_digital_output":
                 iotype, index, value = args[0], args[1], args[2]
                 print("set_digital_output: iotype={} index={} value={}".format(iotype, index, value))
@@ -192,7 +232,7 @@ def execute_move(cobot, command):
             for _ in range(num_circles):
                 for arc_end, arc_mid in [(end_pos, mid_pos), (end_rev, mid_rev)]:
                     logging_cobot.circular_move(arc_end, arc_mid, ABS, True, speed, 200, 0.1)
-            print("Move complete")
+            print("Move complete\n")
 
         elif func == "motion_abort":
             print("Aborting motion!")
@@ -254,7 +294,7 @@ def handle_command(msg):
 
 
 def client_thread(conn, addr):
-    print("Client connected from {}".format(addr))
+    print("Client connected from {}\n".format(addr))
     try:
         while True:
             msg = recv_msg(conn)

@@ -53,7 +53,17 @@ SQUARE_LENGTH_MM = 50.0
 MARKER_LENGTH_MM = 37.0
 ARUCO_DICT = cv2.aruco.DICT_4X4_50
 
+CONTROLS = {
+    ord('w'): [0, -STEP, 0, 0, 0, 0],
+    ord('s'): [0, STEP, 0, 0, 0, 0],
+    ord('d'): [-STEP, 0, 0, 0, 0, 0],
+    ord('a'): [STEP, 0, 0, 0, 0, 0],
+    ord('e'): [0, 0, STEP, 0, 0, 0],
+    ord('q'): [0, 0, -STEP, 0, 0, 0],
+}
+
 model = YOLO(MODEL_PATH)
+hole_fill = rs.hole_filling_filter()
 
 click_points = []
 
@@ -89,15 +99,6 @@ def load_camera_calibration():
         return calib["camera_matrix"]
     print("WARNING: no camera_calibration.json found - click-to-measure disabled.")
     return None
-
-CONTROLS = {
-    ord('w'): [0, -STEP, 0, 0, 0, 0],
-    ord('s'): [0, STEP, 0, 0, 0, 0],
-    ord('d'): [-STEP, 0, 0, 0, 0, 0],
-    ord('a'): [STEP, 0, 0, 0, 0, 0],
-    ord('e'): [0, 0, STEP, 0, 0, 0],
-    ord('q'): [0, 0, -STEP, 0, 0, 0],
-}
 
 
 def send_msg(sock, msg):
@@ -183,9 +184,6 @@ def get_depth_at_screw(depth_data, screw):
                 if val > 0:
                     samples.append(float(val))
     return float(np.median(samples)) if samples else None
-
-
-hole_fill = rs.hole_filling_filter()
 
 
 def _sample_depth_median(pipeline, align, n_frames=5):

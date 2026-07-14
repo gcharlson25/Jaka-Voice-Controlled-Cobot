@@ -2,27 +2,32 @@ import re
 import time
 import os
 import json
+import socket
+import struct
 import numpy as np
 import sounddevice as sd
 import whisper
+import keyboard
 
-from full_tools import execute_command, execute_finetuned_command, execute_screw_command, connect_robot
 from full_llm_finetuned import ask_llm, _backend_name
 
+# ---------------- Constants ----------------
+
+# Robot client connection
+HOST = "127.0.0.1"
+PORT = 9100
+
+# Voice -> vision trigger file
 VISION_COMMAND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_command.json")
 
-def send_vision_command(action):
-    with open(VISION_COMMAND_FILE, "w") as f:
-        json.dump({"action": action}, f)
-    print(f"Vision command sent: {action}")
-
+# Recording
 SAMPLE_RATE = 16000
-SILENCE_THRESHOLD = 0.04
-SILENCE_DURATION = 1.2
-PRE_SPEECH_BUFFER = 0.4
 MAX_RECORD_SECONDS = 10
+MIN_RECORD_SECONDS = 0.3
+PTT_KEY = "space"
 STOP_WORD = "over"
 
+# Keyword parsing
 DIRECTION_MAP = {
     "right":     ("x",  1),
     "left":      ("x", -1),
@@ -34,52 +39,144 @@ DIRECTION_MAP = {
     "down":      ("z", -1),
 }
 
-connect_robot()
+SCREW_NUMBER_WORDS = {
+    "one": 1, "1": 1,
+    "two": 2, "to": 2, "too": 2, "2": 2,
+    "three": 3, "3": 3,
+    "four": 4, "for": 4, "4": 4,
+    "five": 5, "5": 5,
+}
 
-print("Loading Whisper model...")
-model = whisper.load_model("small")
-print("Ready!")
+# ---------------- Module state ----------------
 
-def record_with_vad():
+_sock = None   # TCP connection to the robot client, set by connect_robot()
+model = None   # Whisper model, loaded in main()
+
+# ---------------- Robot connection (TCP to full_robot_client.py) ----------------
+
+
+def _send_msg(sock, msg):
+    data = json.dumps(msg).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(data)) + data)
+
+
+def _recv_msg(sock):
+    raw = _recv_exact(sock, 4)
+    if raw is None:
+        return None
+    length = struct.unpack("!I", raw)[0]
+    data = _recv_exact(sock, length)
+    if data is None:
+        return None
+    return json.loads(data.decode("utf-8"))
+
+
+def _recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def connect_robot():
+    """Connect to full_robot_client.py and trigger robot setup. Call once at startup."""
+    global _sock
+    print(f"Connecting to robot client at {HOST}:{PORT}...")
+    _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _sock.connect((HOST, PORT))
+    _send_msg(_sock, {"command": "setup"})
+    reply = _recv_msg(_sock)
+    print(f"Robot client connected: {reply}")
+
+
+def _send_payload(payload):
+    """Send a command payload to the robot client and wait for the reply."""
+    _send_msg(_sock, {"command": "execute", "payload": payload})
+    return _recv_msg(_sock)
+
+
+def execute_screw_command(action, screw_number):
+    """Fasten/unfasten a screw (1-5) or all screws (0) via full_screw_control.py."""
+    cmd = {"function": "screw_operation", "action": action, "screw_number": screw_number}
+    print(f"Screw operation: {cmd}")
+    _send_payload(cmd)
+    print("Command sent!\n")
+
+
+def execute_finetuned_command(cmd):
+    """Send a positional-args command from llm_finetuned to the robot client."""
+    try:
+        func = cmd["function"]
+        args = cmd.get("args", [])
+
+        if func == "circular_move" and "args" not in cmd:
+            print(f"Sending: {cmd}")
+            _send_payload(cmd)
+            print("Command sent!\n")
+            return
+
+        PASS_THROUGH = {"linear_move", "joint_move", "set_digital_output",
+                        "motion_abort", "execute_script"}
+        if func in PASS_THROUGH:
+            payload = cmd if func == "execute_script" else {"function": func, "args": args}
+            print(f"Sending: {payload}")
+            _send_payload(payload)
+            print("Command sent!\n")
+        else:
+            print(f"Unknown function: {func}")
+    except Exception as e:
+        print(f"Error in execute_finetuned_command: {e}")
+
+
+def execute_command(parsed):
+    try:
+        axis_map = {"x": 0, "y": 1, "z": 2}
+        move = [0, 0, 0, 0, 0, 0]
+        value = parsed["distance"] * parsed["direction"]
+        if parsed["axis"] == "x":
+            value = -value
+        move[axis_map[parsed["axis"]]] = value
+        print(f"Moving: {move}")
+        _send_payload(move)
+        print("Command sent!\n")
+    except Exception as e:
+        print(f"Error in execute_command: {e}")
+
+# ---------------- Voice -> vision trigger ----------------
+
+def send_vision_command(action):
+    with open(VISION_COMMAND_FILE, "w") as f:
+        json.dump({"action": action}, f)
+    print(f"Vision command sent: {action}")
+
+# ---------------- Recording / transcription ----------------
+
+def record_push_to_talk():
     chunk_duration = 0.03
     chunk_size = int(SAMPLE_RATE * chunk_duration)
-    silence_limit = int(SILENCE_DURATION / chunk_duration)
-    pre_buf_limit = int(PRE_SPEECH_BUFFER / chunk_duration)
-    max_speech_chunks = int(MAX_RECORD_SECONDS / chunk_duration)
+    max_chunks = int(MAX_RECORD_SECONDS / chunk_duration)
+    min_chunks = int(MIN_RECORD_SECONDS / chunk_duration)
+
+    print(f"Hold [{PTT_KEY.upper()}] and speak...")
+    keyboard.wait(PTT_KEY)
+    print("Recording... release to finish.")
 
     chunks = []
-    pre_buffer = []
-    speech_started = False
-    silence_count = 0
-    speech_chunk_count = 0
-
-    print("Waiting for speech...")
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32',
                         device=1, blocksize=chunk_size) as stream:
-        while True:
+        while keyboard.is_pressed(PTT_KEY):
             chunk, _ = stream.read(chunk_size)
-            rms = np.sqrt(np.mean(chunk ** 2))
+            chunks.append(chunk.copy())
+            if len(chunks) >= max_chunks:
+                print("Max duration reached, processing...")
+                break
 
-            if not speech_started:
-                pre_buffer.append(chunk.copy())
-                if len(pre_buffer) > pre_buf_limit:
-                    pre_buffer.pop(0)
-                if rms > SILENCE_THRESHOLD:
-                    speech_started = True
-                    print("Speech detected...")
-                    chunks.extend(pre_buffer)
-            else:
-                chunks.append(chunk.copy())
-                speech_chunk_count += 1
-                if speech_chunk_count >= max_speech_chunks:
-                    print("Max duration reached, processing...")
-                    break
-                if rms < SILENCE_THRESHOLD:
-                    silence_count += 1
-                    if silence_count >= silence_limit:
-                        break
-                else:
-                    silence_count = 0
+    if len(chunks) < min_chunks:
+        print("Too short - ignored.")
+        return None
 
     return np.concatenate(chunks).flatten()
 
@@ -87,6 +184,8 @@ def transcribe(audio):
     print("Transcribing...")
     result = model.transcribe(audio, fp16=False)
     return result["text"].strip()
+
+# ---------------- Keyword parsing ----------------
 
 def parse_command(text):
     words = re.findall(r"[\w']+", text.lower())
@@ -100,14 +199,6 @@ def parse_command(text):
     match = re.search(r'\b(\d+(?:\.\d+)?)\b', text)
     distance = int(float(match.group(1))) if match else 10
     return {"axis": axis, "distance": distance, "direction": direction}
-
-SCREW_NUMBER_WORDS = {
-    "one": 1, "1": 1,
-    "two": 2, "to": 2, "too": 2, "2": 2,
-    "three": 3, "3": 3,
-    "four": 4, "for": 4, "4": 4,
-    "five": 5, "5": 5,
-}
 
 def parse_screw_command(text):
     t = text.lower()
@@ -124,45 +215,64 @@ def parse_screw_command(text):
             return {"action": action, "screw_number": n}
     return None
 
-while True:
-    audio = record_with_vad()
-    command = transcribe(audio)
-    print(f"You said: {command}")
-    if "quit" in command.lower() or "program over" in command.lower():
-        print("Ending program.")
-        break
-    if "calibrate" in command.lower():
-        send_vision_command("calibrate")
-        continue
-    if "align" in command.lower():
-        send_vision_command("align")
-        continue
-    command = re.sub(r'\b' + STOP_WORD + r'\b\.?\s*$', '', command, flags=re.IGNORECASE).strip()
-    if not command:
-        continue
-    sub_commands = [s.strip().strip('.,') for s in re.split(r'\band\b|\bthen\b|,', command, flags=re.IGNORECASE) if s.strip().strip('.,')]
-    parsed_parts = []
-    for s in sub_commands:
-        screw = parse_screw_command(s)
-        if screw is not None:
-            parsed_parts.append(("screw", screw))
-        else:
-            move = parse_command(s)
-            parsed_parts.append(("move", move) if move is not None else None)
+# ---------------- Main loop ----------------
 
-    if sub_commands and all(p is not None for p in parsed_parts):
-        for kind, parsed in parsed_parts:
-            print(f"Parsed: {kind} {parsed}")
-            if kind == "screw":
-                execute_screw_command(parsed["action"], parsed["screw_number"])
-            else:
-                execute_command(parsed)
-    else:
-        print("Sending to LLM...")
-        tool_results = ask_llm(command)
-        if not tool_results:
-            print("Invalid instruction.")
+def main():
+    global model
+
+    connect_robot()
+
+    print("Loading Whisper model...")
+    model = whisper.load_model("small")
+    print("Ready!")
+
+    while True:
+        audio = record_push_to_talk()
+        if audio is None:
             continue
-        print(f"{_backend_name}: {tool_results}")
-        for tool_result in tool_results:
-            execute_finetuned_command(tool_result)
+        command = transcribe(audio)
+        print(f"You said: {command}")
+        if "quit" in command.lower() or "program over" in command.lower():
+            print("Ending program.")
+            break
+        if "calibrate" in command.lower():
+            send_vision_command("calibrate")
+            continue
+        if "align" in command.lower():
+            send_vision_command("align")
+            continue
+        command = re.sub(r'\b' + STOP_WORD + r'\b\.?\s*$', '', command, flags=re.IGNORECASE).strip()
+        if not command:
+            continue
+        sub_commands = [s.strip().strip('.,') for s in re.split(r'\band\b|\bthen\b|,', command, flags=re.IGNORECASE) if s.strip().strip('.,')]
+        parsed_parts = []
+        for s in sub_commands:
+            screw = parse_screw_command(s)
+            if screw is not None:
+                parsed_parts.append(("screw", screw))
+            else:
+                move = parse_command(s)
+                parsed_parts.append(("move", move) if move is not None else None)
+
+        if sub_commands and all(p is not None for p in parsed_parts):
+            for kind, parsed in parsed_parts:
+                print(f"Parsed: {kind} {parsed}")
+                if kind == "screw":
+                    execute_screw_command(parsed["action"], parsed["screw_number"])
+                else:
+                    execute_command(parsed)
+        else:
+            print("Sending to LLM...")
+            print()
+            tool_results = ask_llm(command)
+            if not tool_results:
+                print("Invalid instruction.\n")
+                continue
+            print(f"{_backend_name}: {tool_results}")
+            print()
+            for tool_result in tool_results:
+                execute_finetuned_command(tool_result)
+
+
+if __name__ == "__main__":
+    main()
