@@ -23,9 +23,10 @@ MAX_DELTA_Z = 100.0
 RECOVERY_STEP = 1.0
 RECOVERY_MAX_STEPS = 20
 
-# PID gains for XY alignment (P-only for now; I and D added as tuning demands)
-KP = 0.10               # mm of correction per pixel of error (~1/3 of physical gain)
-MAX_STEP_MM = 5.0       # hard cap on any single correction step
+KP = 0.10         
+KI = 0.01           
+I_WINDUP_PX = 100.0    
+MAX_STEP_MM = 5.0      
 
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
@@ -277,6 +278,9 @@ def auto_align(sock, pipeline, align, target, calibration_z):
     send_robot_command(sock, {"command": "move", "move": [0, 0, -delta_z, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
     time.sleep(0.1)
 
+    integral_x = 0.0
+    integral_y = 0.0
+
     while True:
         frames = pipeline.wait_for_frames()
         aligned = align.process(frames)
@@ -328,9 +332,17 @@ def auto_align(sock, pipeline, align, target, calibration_z):
 
         move = [0, 0, 0, 0, 0, 0]
         if abs(err_x) > ALIGN_TOLERANCE:
-            move[1] = max(-MAX_STEP_MM, min(MAX_STEP_MM, KP * err_x)) * PIXEL_X_TO_ROBOT_DIR
+            if err_x * integral_x < 0:
+                integral_x = 0.0  
+            integral_x = max(-I_WINDUP_PX, min(I_WINDUP_PX, integral_x + err_x))
+            step_x = KP * err_x + KI * integral_x
+            move[1] = max(-MAX_STEP_MM, min(MAX_STEP_MM, step_x)) * PIXEL_X_TO_ROBOT_DIR
         if abs(err_y) > ALIGN_TOLERANCE:
-            move[0] = max(-MAX_STEP_MM, min(MAX_STEP_MM, KP * err_y)) * PIXEL_Y_TO_ROBOT_DIR
+            if err_y * integral_y < 0:
+                integral_y = 0.0
+            integral_y = max(-I_WINDUP_PX, min(I_WINDUP_PX, integral_y + err_y))
+            step_y = KP * err_y + KI * integral_y
+            move[0] = max(-MAX_STEP_MM, min(MAX_STEP_MM, step_y)) * PIXEL_Y_TO_ROBOT_DIR
 
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
         time.sleep(0.25)
@@ -415,7 +427,6 @@ def main():
                         depth_color = (0, 128, 255)
                     cv2.putText(display, depth_label, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, depth_color, 2)
 
-            # ChArUco board recognition (markers + corner IDs + accuracy check)
             charuco_corners, charuco_ids, marker_corners, marker_ids = charuco_detector.detectBoard(image)
 
             if marker_ids is not None and len(marker_ids) > 0:
@@ -436,7 +447,6 @@ def main():
                             id_a, id_b = ids_flat[i], ids_flat[j]
                             row_a, col_a = divmod(id_a, board_cols)
                             row_b, col_b = divmod(id_b, board_cols)
-                            # only compare corners exactly one square apart (horiz or vert neighbor)
                             if (row_a == row_b and abs(col_a - col_b) == 1) or (col_a == col_b and abs(row_a - row_b) == 1):
                                 u_a, v_a = charuco_corners[i][0]
                                 u_b, v_b = charuco_corners[j][0]
@@ -454,7 +464,6 @@ def main():
                                              f"err {avg_err:+.1f}mm ({pct_err:+.1f}%) n={len(errors)}",
                                     (10, display.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-            # Click-to-measure (two points -> real-world mm distance)
             if len(click_points) == 1:
                 cv2.circle(display, click_points[0], 2, (0, 0, 255), -1)
             elif len(click_points) == 2:

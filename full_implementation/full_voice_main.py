@@ -11,23 +11,17 @@ import keyboard
 
 from full_llm_finetuned import ask_llm, _backend_name
 
-# ---------------- Constants ----------------
-
-# Robot client connection
 HOST = "127.0.0.1"
 PORT = 9100
 
-# Voice -> vision trigger file
 VISION_COMMAND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision_command.json")
 
-# Recording
 SAMPLE_RATE = 16000
 MAX_RECORD_SECONDS = 10
 MIN_RECORD_SECONDS = 0.3
 PTT_KEY = "space"
 STOP_WORD = "over"
 
-# Keyword parsing
 DIRECTION_MAP = {
     "right":     ("x",  1),
     "left":      ("x", -1),
@@ -47,13 +41,8 @@ SCREW_NUMBER_WORDS = {
     "five": 5, "5": 5,
 }
 
-# ---------------- Module state ----------------
-
-_sock = None   # TCP connection to the robot client, set by connect_robot()
-model = None   # Whisper model, loaded in main()
-
-# ---------------- Robot connection (TCP to full_robot_client.py) ----------------
-
+_sock = None   
+model = None   
 
 def _send_msg(sock, msg):
     data = json.dumps(msg).encode("utf-8")
@@ -145,14 +134,12 @@ def execute_command(parsed):
     except Exception as e:
         print(f"Error in execute_command: {e}")
 
-# ---------------- Voice -> vision trigger ----------------
 
 def send_vision_command(action):
     with open(VISION_COMMAND_FILE, "w") as f:
         json.dump({"action": action}, f)
     print(f"Vision command sent: {action}")
 
-# ---------------- Recording / transcription ----------------
 
 def record_push_to_talk():
     chunk_duration = 0.03
@@ -185,7 +172,6 @@ def transcribe(audio):
     result = model.transcribe(audio, fp16=False)
     return result["text"].strip()
 
-# ---------------- Keyword parsing ----------------
 
 def parse_command(text):
     words = re.findall(r"[\w']+", text.lower())
@@ -214,8 +200,6 @@ def parse_screw_command(text):
         if re.search(r'\b' + word + r'\b', t):
             return {"action": action, "screw_number": n}
     return None
-
-# ---------------- Main loop ----------------
 
 def main():
     global model

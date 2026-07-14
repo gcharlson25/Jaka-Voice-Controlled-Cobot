@@ -29,15 +29,13 @@ INCR = 1
 TCP = [0, 0, 0, 0, 0, 0]
 USR = [0, 0, 0, 0, 0, 0]
 
-# Per-joint safe envelope in DEGREES (min, max), joints 1-6, measured on the cell.
-# Enforced on LLM-generated joint moves only; taught screw routines are trusted.
 JOINT_LIMITS_DEG = [
-    (-140, -15),   # J1
-    (  30,  90),   # J2
-    (  50, 150),   # J3
-    ( -65,  55),   # J4
-    (-200, -45),   # J5
-    ( -90,  10),   # J6
+    (-140, -15),   
+    (  30,  90),   
+    (  50, 150),   
+    ( -65,  55),   
+    (-200, -45),   
+    ( -90,  10),   
 ]
 JOINT_LIMITS = [(math.radians(lo), math.radians(hi)) for lo, hi in JOINT_LIMITS_DEG]
 
