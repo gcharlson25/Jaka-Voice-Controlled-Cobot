@@ -23,10 +23,11 @@ MAX_DELTA_Z = 100.0
 RECOVERY_STEP = 1.0
 RECOVERY_MAX_STEPS = 20
 
-KP = 0.10         
-KI = 0.01           
-I_WINDUP_PX = 100.0    
-MAX_STEP_MM = 5.0      
+KP = 0.10
+KI = 0.01
+KD = 0.05
+I_WINDUP_PX = 100.0
+MAX_STEP_MM = 5.0
 
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
@@ -280,6 +281,8 @@ def auto_align(sock, pipeline, align, target, calibration_z):
 
     integral_x = 0.0
     integral_y = 0.0
+    prev_err_x = None
+    prev_err_y = None
 
     while True:
         frames = pipeline.wait_for_frames()
@@ -333,16 +336,21 @@ def auto_align(sock, pipeline, align, target, calibration_z):
         move = [0, 0, 0, 0, 0, 0]
         if abs(err_x) > ALIGN_TOLERANCE:
             if err_x * integral_x < 0:
-                integral_x = 0.0  
+                integral_x = 0.0
             integral_x = max(-I_WINDUP_PX, min(I_WINDUP_PX, integral_x + err_x))
-            step_x = KP * err_x + KI * integral_x
+            deriv_x = (err_x - prev_err_x) if prev_err_x is not None else 0.0
+            step_x = KP * err_x + KI * integral_x + KD * deriv_x
             move[1] = max(-MAX_STEP_MM, min(MAX_STEP_MM, step_x)) * PIXEL_X_TO_ROBOT_DIR
         if abs(err_y) > ALIGN_TOLERANCE:
             if err_y * integral_y < 0:
                 integral_y = 0.0
             integral_y = max(-I_WINDUP_PX, min(I_WINDUP_PX, integral_y + err_y))
-            step_y = KP * err_y + KI * integral_y
+            deriv_y = (err_y - prev_err_y) if prev_err_y is not None else 0.0
+            step_y = KP * err_y + KI * integral_y + KD * deriv_y
             move[0] = max(-MAX_STEP_MM, min(MAX_STEP_MM, step_y)) * PIXEL_Y_TO_ROBOT_DIR
+
+        prev_err_x = err_x
+        prev_err_y = err_y
 
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
         time.sleep(0.25)
