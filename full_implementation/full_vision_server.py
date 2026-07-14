@@ -23,14 +23,9 @@ MAX_DELTA_Z = 100.0
 RECOVERY_STEP = 1.0
 RECOVERY_MAX_STEPS = 20
 
-ALIGN_STEP_BANDS = [
-    (100, 5.0),
-    (50, 2.0),
-    (20, 1.0),
-    (10, 0.5),
-    (5, 0.1),
-    (0, 0.05),
-]
+# PID gains for XY alignment (P-only for now; I and D added as tuning demands)
+KP = 0.10               # mm of correction per pixel of error (~1/3 of physical gain)
+MAX_STEP_MM = 5.0       # hard cap on any single correction step
 
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
@@ -217,14 +212,6 @@ def setup_camera():
     return pipeline, align
 
 
-def get_step_size(err_px):
-    err_px = abs(err_px)
-    for threshold, step_mm in ALIGN_STEP_BANDS:
-        if err_px > threshold:
-            return step_mm
-    return ALIGN_STEP_BANDS[-1][1]
-
-
 def send_robot_command(sock, command):
     send_msg(sock, command)
     reply = recv_msg(sock)
@@ -341,9 +328,9 @@ def auto_align(sock, pipeline, align, target, calibration_z):
 
         move = [0, 0, 0, 0, 0, 0]
         if abs(err_x) > ALIGN_TOLERANCE:
-            move[1] = get_step_size(err_x) * PIXEL_X_TO_ROBOT_DIR * (1 if err_x > 0 else -1)
+            move[1] = max(-MAX_STEP_MM, min(MAX_STEP_MM, KP * err_x)) * PIXEL_X_TO_ROBOT_DIR
         if abs(err_y) > ALIGN_TOLERANCE:
-            move[0] = get_step_size(err_y) * PIXEL_Y_TO_ROBOT_DIR * (1 if err_y > 0 else -1)
+            move[0] = max(-MAX_STEP_MM, min(MAX_STEP_MM, KP * err_y)) * PIXEL_Y_TO_ROBOT_DIR
 
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
         time.sleep(0.25)
