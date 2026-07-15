@@ -171,6 +171,18 @@ def unfastenAfterAlign(cobot):
     cobot.linear_move_extend(UNFASTEN, INCREMENT_MOVEMENT, True, 1800, 3500.000, 1)
     cobot.set_digital_output(IO_TOOL, GO, OFF)
     cobot.linear_move_extend(DISENGAGE, INCREMENT_MOVEMENT, True, 1800, 3500.000, 1)
+    cobot.linear_move_extend([0, 0, -78.5, 0, 0, 0], INCREMENT_MOVEMENT, True, 1800, 3500.000, 1)
+    time.sleep(1)
+    print("fastening the screw")
+    cobot.set_digital_output(IO_TOOL, DIRECTION, OFF)
+    cobot.set_digital_output(IO_TOOL, GO, ON)
+    time.sleep(1)
+    cobot.linear_move_extend(ENGAGE, INCREMENT_MOVEMENT, True, 664.046, 1348.247, 1)
+    cobot.linear_move_extend(FASTEN, INCREMENT_MOVEMENT, True, 35.000, 572.894, 1)
+    cobot.set_digital_output(IO_TOOL, GO, OFF)
+    cobot.linear_move_extend(DISENGAGE, INCREMENT_MOVEMENT, True, 1800, 3500.000, 1)
+    cobot.set_digital_output(IO_TOOL, DIRECTION, OFF)
+    cobot.set_digital_output(IO_TOOL, GO, OFF)
     cobot.linear_move_extend(DISENGAGE, INCREMENT_MOVEMENT, True, 1800, 3500.000, 1)
 
 def main():

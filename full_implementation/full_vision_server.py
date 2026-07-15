@@ -556,12 +556,17 @@ def main():
                 cv2.drawMarker(display, (target[0], target[1]), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
             if calibration_z is not None:
-                if cal_robot_pos is not None:
-                    rx, ry, rz = cal_robot_pos
-                    cv2.putText(display, f"Cal pos  X:{rx:.1f} Y:{ry:.1f} Z:{rz:.1f}",
-                                (10, display.shape[0] - 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
                 cv2.putText(display, f"Calibration Dist: {calibration_z:.1f} mm",
                             (10, display.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
+
+            if cal_robot_pos is not None:
+                cal_lines = [f"Cal X: {cal_robot_pos[0]:.1f}",
+                             f"Cal Y: {cal_robot_pos[1]:.1f}",
+                             f"Cal Z: {cal_robot_pos[2]:.1f}"]
+                for i, line in enumerate(cal_lines):
+                    (tw, _), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.putText(display, line, (display.shape[1] - tw - 10, display.shape[0] - 135 + i * 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
 
             if last_delta_z is not None:
                 dz_text = f"dZ: {last_delta_z:.1f} mm"
