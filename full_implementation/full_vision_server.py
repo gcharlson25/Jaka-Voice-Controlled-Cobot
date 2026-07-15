@@ -17,17 +17,20 @@ SPEED = 250
 STEP = 1
 
 ALIGN_SPEED = 100
-ALIGN_TOLERANCE = 1
+ALIGN_TOLERANCE = 2
 DEPTH_PROBE_STEP = 80.0
 MAX_DELTA_Z = 100.0
 RECOVERY_STEP = 1.0
 RECOVERY_MAX_STEPS = 20
 
-KP = 0.10
-KI = 0.01
-KD = 0.05
+KP = 0.12
+KI = 0.0
+KD = 0.0
 I_WINDUP_PX = 100.0
 MAX_STEP_MM = 5.0
+ALIGN_SAMPLE_FRAMES = 3
+ALIGN_SAMPLE_FRAMES_NEAR = 8   # extra averaging when close - endgame noise ~ step size
+ALIGN_NEAR_PX = 6              # "close" threshold: max axis error below this
 
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
@@ -247,33 +250,46 @@ def recover_screw_by_climbing(sock, pipeline, align):
     return None, None
 
 
-def auto_align(sock, pipeline, align, target, calibration_z):
+def auto_align(sock, pipeline, align, target, calibration_z, cal_robot_pos=None):
     target_x, target_y = target
     print(f"Auto-aligning to target pixel ({target_x}, {target_y})...")
     print("Press ESC to cancel")
 
-    d = _sample_depth_median(pipeline, align)
-    climbed = 0.0
-    if d is None:
-        print("Z probe failed: no depth reading, climbing to recover...")
-        d, climbed = recover_depth_by_climbing(sock, pipeline, align)
+    if cal_robot_pos is not None:
+        # Z from the robot's own encoders vs the calibrated pose - exact and
+        # immune to depth sensor noise. Assumes the workpiece height hasn't
+        # changed since calibration (press C again if it has).
+        reply = send_robot_command(sock, {"command": "get_position"})
+        if not reply or reply.get("status") != "ok":
+            print("Z failed: could not read robot position")
+            return False, None
+        delta_z = reply["position"][2] - cal_robot_pos[2]
+    else:
+        # legacy fallback for calibrations saved without a robot pose:
+        # camera depth probe + offset geometry
+        d = _sample_depth_median(pipeline, align)
+        climbed = 0.0
         if d is None:
-            print("Z probe failed: no depth reading after recovery attempts")
+            print("Z probe failed: no depth reading, climbing to recover...")
+            d, climbed = recover_depth_by_climbing(sock, pipeline, align)
+            if d is None:
+                print("Z probe failed: no depth reading after recovery attempts")
+                return False, None
+
+        X = compute_calibration_z(d)
+        if X is None:
+            print(f"Z probe failed: depth {d:.1f} too small for geometry")
             return False, None
 
-    X = compute_calibration_z(d)
-    if X is None:
-        print(f"Z probe failed: depth {d:.1f} too small for geometry")
-        return False, None
+        if climbed > 0:
+            send_robot_command(sock, {"command": "move", "move": [0, 0, -climbed, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
+            time.sleep(0.1)
+            X -= climbed
 
-    if climbed > 0:
-        send_robot_command(sock, {"command": "move", "move": [0, 0, -climbed, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
-        time.sleep(0.1)
-        X -= climbed
+        delta_z = X - calibration_z
 
-    delta_z = X - calibration_z
     if abs(delta_z) > MAX_DELTA_Z:
-        print(f"Z probe rejected: delta_z {delta_z:.1f} exceeds {MAX_DELTA_Z} mm threshold")
+        print(f"Z rejected: delta_z {delta_z:.1f} exceeds {MAX_DELTA_Z} mm threshold")
         return False, None
 
     send_robot_command(sock, {"command": "move", "move": [0, 0, -delta_z, 0, 0, 0], "speed": ALIGN_SPEED, "blocking": True})
@@ -285,18 +301,35 @@ def auto_align(sock, pipeline, align, target, calibration_z):
     prev_err_y = None
 
     while True:
-        frames = pipeline.wait_for_frames()
-        aligned = align.process(frames)
-        color_frame = aligned.get_color_frame()
-        if not color_frame:
+        # average the detected center over several frames - single-frame YOLO
+        # centers jitter a couple px, which makes the controller chase noise.
+        # Near the target, average harder: there the noise rivals the step size.
+        if prev_err_x is not None and max(abs(prev_err_x), abs(prev_err_y)) <= ALIGN_NEAR_PX:
+            n_frames = ALIGN_SAMPLE_FRAMES_NEAR
+        else:
+            n_frames = ALIGN_SAMPLE_FRAMES
+        centers = []
+        image = None
+        screw = None
+        for _ in range(n_frames):
+            frames = pipeline.wait_for_frames()
+            aligned = align.process(frames)
+            color_frame = aligned.get_color_frame()
+            if not color_frame:
+                continue
+            image = np.asanyarray(color_frame.get_data())
+            det = detect_screw(image)
+            if det is not None:
+                screw = det
+                centers.append((det[0], det[1]))
+        if image is None:
             continue
-
-        image = np.asanyarray(color_frame.get_data())
-        screw = detect_screw(image)
 
         display = image.copy()
         cv2.drawMarker(display, (target_x, target_y), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
+        if not centers:
+            screw = None
         if screw is None:
             cv2.putText(display, "NO SCREW DETECTED - recovering",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -311,16 +344,19 @@ def auto_align(sock, pipeline, align, target, calibration_z):
                     print("Auto-align cancelled")
                     return False, delta_z
                 continue
+            centers = [(screw[0], screw[1])]
 
         sx, sy, sw, sh = screw
         cv2.rectangle(display, (sx - sw // 2, sy - sh // 2), (sx + sw // 2, sy + sh // 2), (0, 255, 0), 2)
         cv2.circle(display, (sx, sy), 3, (0, 255, 0), -1)
         cv2.line(display, (sx, sy), (target_x, target_y), (255, 0, 0), 2)
 
-        err_x = sx - target_x
-        err_y = sy - target_y
+        avg_x = sum(c[0] for c in centers) / len(centers)
+        avg_y = sum(c[1] for c in centers) / len(centers)
+        err_x = avg_x - target_x
+        err_y = avg_y - target_y
 
-        cv2.putText(display, f"Error: ({err_x}, {err_y}) px",
+        cv2.putText(display, f"Error: ({err_x:.1f}, {err_y:.1f}) px",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         dz_text = f"dZ: {delta_z:.1f} mm"
         (tw, _), _ = cv2.getTextSize(dz_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -329,7 +365,7 @@ def auto_align(sock, pipeline, align, target, calibration_z):
         cv2.imshow("Teleop", display)
 
         if abs(err_x) <= ALIGN_TOLERANCE and abs(err_y) <= ALIGN_TOLERANCE:
-            print(f"Aligned! Final error: ({err_x}, {err_y}) px")
+            print(f"Aligned! Final error: ({err_x:.1f}, {err_y:.1f}) px")
             cv2.waitKey(500)
             return True, delta_z
 
@@ -354,6 +390,10 @@ def auto_align(sock, pipeline, align, target, calibration_z):
 
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
         time.sleep(0.25)
+
+        # flush frames buffered during the move so the next error reading is truly post-move
+        for _ in range(2):
+            pipeline.wait_for_frames()
 
         if cv2.waitKey(1) & 0xFF == 27:
             print("Auto-align cancelled")
@@ -553,18 +593,20 @@ def main():
             if key == ord('c'):
                 if screw is None:
                     print("No screw detected! Move closer and try again.")
-                elif current_depth_mm is None:
-                    print("No valid depth reading - wait for the depth overlay to show a value, then calibrate.")
+                elif robot_pos is None:
+                    print("No robot position yet - wait a moment, then calibrate.")
                 else:
                     sx, sy, sw, sh = screw
                     target = (sx, sy)
-                    calibration_z = compute_calibration_z(current_depth_mm)
-                    cal_robot_pos = robot_pos[:3] if robot_pos is not None else None
+                    # depth is optional now: Z alignment uses the robot pose;
+                    # calibration_z is kept as the legacy depth fallback
+                    calibration_z = compute_calibration_z(current_depth_mm) if current_depth_mm is not None else None
+                    cal_robot_pos = robot_pos[:3]
                     save_calibration(sx, sy, calibration_z, cal_robot_pos)
 
             if key == ord('t'):
-                if target and calibration_z is not None:
-                    _, last_delta_z = auto_align(sock, pipeline, align, target, calibration_z)
+                if target and (cal_robot_pos is not None or calibration_z is not None):
+                    _, last_delta_z = auto_align(sock, pipeline, align, target, calibration_z, cal_robot_pos)
                 else:
                     print("No calibration! Align over a screw and press C first.")
 
