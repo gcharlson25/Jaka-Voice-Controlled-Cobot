@@ -29,8 +29,8 @@ KD = 0.0
 I_WINDUP_PX = 100.0
 MAX_STEP_MM = 5.0
 ALIGN_SAMPLE_FRAMES = 3
-ALIGN_SAMPLE_FRAMES_NEAR = 8   # extra averaging when close - endgame noise ~ step size
-ALIGN_NEAR_PX = 6              # "close" threshold: max axis error below this
+ALIGN_SAMPLE_FRAMES_NEAR = 8
+ALIGN_NEAR_PX = 6
 
 PIXEL_X_TO_ROBOT_DIR = 1
 PIXEL_Y_TO_ROBOT_DIR = 1
@@ -256,17 +256,12 @@ def auto_align(sock, pipeline, align, target, calibration_z, cal_robot_pos=None)
     print("Press ESC to cancel")
 
     if cal_robot_pos is not None:
-        # Z from the robot's own encoders vs the calibrated pose - exact and
-        # immune to depth sensor noise. Assumes the workpiece height hasn't
-        # changed since calibration (press C again if it has).
         reply = send_robot_command(sock, {"command": "get_position"})
         if not reply or reply.get("status") != "ok":
             print("Z failed: could not read robot position")
             return False, None
         delta_z = reply["position"][2] - cal_robot_pos[2]
     else:
-        # legacy fallback for calibrations saved without a robot pose:
-        # camera depth probe + offset geometry
         d = _sample_depth_median(pipeline, align)
         climbed = 0.0
         if d is None:
@@ -301,9 +296,6 @@ def auto_align(sock, pipeline, align, target, calibration_z, cal_robot_pos=None)
     prev_err_y = None
 
     while True:
-        # average the detected center over several frames - single-frame YOLO
-        # centers jitter a couple px, which makes the controller chase noise.
-        # Near the target, average harder: there the noise rivals the step size.
         if prev_err_x is not None and max(abs(prev_err_x), abs(prev_err_y)) <= ALIGN_NEAR_PX:
             n_frames = ALIGN_SAMPLE_FRAMES_NEAR
         else:
@@ -391,7 +383,6 @@ def auto_align(sock, pipeline, align, target, calibration_z, cal_robot_pos=None)
         send_robot_command(sock, {"command": "move", "move": move, "speed": ALIGN_SPEED, "blocking": True})
         time.sleep(0.25)
 
-        # flush frames buffered during the move so the next error reading is truly post-move
         for _ in range(2):
             pipeline.wait_for_frames()
 
@@ -555,10 +546,6 @@ def main():
             if target:
                 cv2.drawMarker(display, (target[0], target[1]), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
-            if calibration_z is not None:
-                cv2.putText(display, f"Calibration Dist: {calibration_z:.1f} mm",
-                            (10, display.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
-
             if cal_robot_pos is not None:
                 cal_lines = [f"Cal X: {cal_robot_pos[0]:.1f}",
                              f"Cal Y: {cal_robot_pos[1]:.1f}",
@@ -603,8 +590,6 @@ def main():
                 else:
                     sx, sy, sw, sh = screw
                     target = (sx, sy)
-                    # depth is optional now: Z alignment uses the robot pose;
-                    # calibration_z is kept as the legacy depth fallback
                     calibration_z = compute_calibration_z(current_depth_mm) if current_depth_mm is not None else None
                     cal_robot_pos = robot_pos[:3]
                     save_calibration(sx, sy, calibration_z, cal_robot_pos)

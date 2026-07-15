@@ -157,7 +157,9 @@ SYSTEM_PROMPT = (
     "To stop unfastening:  cobot.set_digital_output(1, 1, 0) and then cobot.set_digital_output(1, 2, 0)\n"
     "For all multi-step sequences use is_block=True to ensure\n"
     "each move completes before the next begins.\n\n"
-    "Respond with only the cobot function calls, one per line, no explanation."
+    "Respond with only the cobot function calls, one per line. No explanation,\n"
+    "no markdown, no code fences, no comments, no variables or loops - just\n"
+    "plain cobot.xxx(...) lines with all values written out as numbers."
 )
 
 MAX_COMMANDS_PER_REQUEST = 20
@@ -210,7 +212,11 @@ def _extract_speed(command, default=500):
     return default
 
 def parse_response(text, command=""):
-    text = re.sub(r'```[a-z]*\n?', '', text).strip()
+    fenced = re.findall(r'```[a-zA-Z]*\n(.*?)```', text, re.DOTALL)
+    if fenced:
+        text = "\n".join(fenced).strip()
+    else:
+        text = re.sub(r'```[a-z]*\n?', '', text).strip()
     if "circular_move" in text:
         radius = _extract_radius(text)
         plane = _extract_plane(command)

@@ -39,8 +39,19 @@ JOINT_LIMITS_DEG = [
 ]
 JOINT_LIMITS = [(math.radians(lo), math.radians(hi)) for lo, hi in JOINT_LIMITS_DEG]
 
+MAX_LINEAR_MM = 150.0
+
 cobot = None
 cmd_lock = threading.Lock()
+
+
+def check_linear_limits(move, mode):
+    if mode != INCR:
+        return None
+    dist = math.sqrt(move[0] ** 2 + move[1] ** 2 + move[2] ** 2)
+    if dist > MAX_LINEAR_MM:
+        return "linear move of {:.1f} mm exceeds the {:.0f} mm per-move limit".format(dist, MAX_LINEAR_MM)
+    return None
 
 
 def check_joint_limits(joint_pos, mode):
@@ -76,6 +87,10 @@ class _LoggingCobot:
                 reason = check_joint_limits(args[0], args[1])
                 if reason is not None:
                     raise RuntimeError("SAFETY REJECTED joint_move: {}".format(reason))
+            if name in ("linear_move", "linear_move_extend") and len(args) >= 2:
+                reason = check_linear_limits(args[0], args[1])
+                if reason is not None:
+                    raise RuntimeError("SAFETY REJECTED {}: {}".format(name, reason))
             result = attr(*args, **kwargs)
             if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], int) and result[0] != 0:
                 print("WARNING: cobot.{}{} returned errcode {}".format(name, args, result[0]))
@@ -131,6 +146,10 @@ def setup_robot():
 def execute_move(cobot, command):
     try:
         if isinstance(command, list):
+            reason = check_linear_limits(command, INCR)
+            if reason is not None:
+                print("SAFETY REJECTED move: {}".format(reason))
+                return
             print("Executing move: {}".format(command))
             cobot.linear_move(command, INCR, False, 500)
             print("Move complete\n")
@@ -166,6 +185,10 @@ def execute_move(cobot, command):
             args = command["args"]
             if func == "linear_move":
                 end_pos, mode, _, speed = args[0], args[1], args[2], args[3]
+                reason = check_linear_limits(end_pos, mode)
+                if reason is not None:
+                    print("SAFETY REJECTED linear_move: {}".format(reason))
+                    return
                 print("Executing linear_move: {} mode={} speed={}".format(end_pos, mode, speed))
                 cobot.linear_move(end_pos, mode, True, speed)
                 print("Move complete\n")
@@ -273,6 +296,10 @@ def handle_command(msg):
         move = msg["move"]
         speed = msg.get("speed", 250)
         blocking = msg.get("blocking", False)
+        reason = check_linear_limits(move, INCR)
+        if reason is not None:
+            print("SAFETY REJECTED move: {}".format(reason))
+            return {"status": "error", "message": reason}
         cobot.linear_move(move, INCR, blocking, speed)
         return {"status": "ok"}
 
