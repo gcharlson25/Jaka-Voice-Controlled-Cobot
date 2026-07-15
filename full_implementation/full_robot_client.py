@@ -16,7 +16,7 @@ import threading
 from full_screw_control import (
     fastenScrew1, fastenScrew2, fastenScrew3, fastenScrew4, fastenScrew5,
     unfastenScrew1, unfastenScrew2, unfastenScrew3, unfastenScrew4, unfastenScrew5,
-    fastenAll, unfastenAll,
+    fastenAll, unfastenAll, unfastenAfterAlign,
     IO_TOOL, GO, DIRECTION, OFF,
 )
 
@@ -186,6 +186,10 @@ def execute_move(cobot, command):
                 print("Aborting motion!")
                 cobot.motion_abort()
                 print("Motion aborted")
+            elif func == "unfasten_after_align":
+                print("Unfastening at current (aligned) position")
+                unfastenAfterAlign(cobot)
+                print("Unfasten complete")
             else:
                 print("Unknown function: {}".format(func))
             return

@@ -108,7 +108,7 @@ def execute_finetuned_command(cmd):
             return
 
         PASS_THROUGH = {"linear_move", "joint_move", "set_digital_output",
-                        "motion_abort", "execute_script"}
+                        "motion_abort", "execute_script", "unfasten_after_align"}
         if func in PASS_THROUGH:
             payload = cmd if func == "execute_script" else {"function": func, "args": args}
             print(f"Sending: {payload}")
