@@ -35,7 +35,7 @@ SCREW4_FASTEN_START_JOINT = [math.radians(x) for x in [-82.604, 83.497, 110.672,
 SCREW5_UNFASTEN_START_JOINT = [math.radians(x) for x in [-88.220, 85.296, 111.889, 43.076, -91.316, -43.318]]
 SCREW5_FASTEN_START_JOINT = [math.radians(x) for x in [-88.220, 84.637, 109.737, 45.888, -91.316, -43.318]]
 
-ENGAGE = [0, 0, -7, 0, 0, 0]
+ENGAGE = [0, 0, -8, 0, 0, 0]
 DISENGAGE = [0, 0, 50, 0, 0, 0]
 UNFASTEN = [0, 0, 60, 0, 0, 0]
 FASTEN = [0, 0, -22, 0, 0, 0]
